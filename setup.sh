@@ -1371,6 +1371,20 @@ chmod 755 src/package/DEBIAN/postinst src/package/DEBIAN/prerm
 
 cd src
 
+echo "===== KILL AVAILABLE ====="
+python3 - <<'PY'
+import re, os
+for r, _, fs in os.walk('kcore/kfd'):
+    for f in fs:
+        if f.endswith(('.h', '.c', '.m')):
+            p = os.path.join(r, f)
+            s = open(p, errors='ignore').read()
+            s = re.sub(r'@available\(iOS 16(\.0)?, \*\)', '1', s)
+            s = re.sub(r'@available\([^)]*\)', '0', s)
+            open(p, 'w').write(s)
+print('available killed')
+PY
+
 echo "===== COMPILE ====="
 SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
 TG=arm64e-apple-ios15.0
