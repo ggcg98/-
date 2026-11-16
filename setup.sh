@@ -49,6 +49,7 @@ cat > src/kcore/krw.h <<'KRWH_EOF'
 extern uint64_t g_kbase, g_kslide, g_kernel_pmap, g_physmap_base, g_gnames;
 extern int g_kfd_ready;
 extern int g_off_teamid;
+extern int g_ps_n;
 typedef struct { float x, y, z; } RVec3;
 int row_up(void);
 uint64_t r64(uint64_t a);
