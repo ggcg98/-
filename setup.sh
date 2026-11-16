@@ -73,7 +73,6 @@ float kcd_health_of(uint64_t pawn);
 int kcd_calib_teamid(void);
 int kcd_reflect_teamid(void);
 KRWH_EOF
-
 cat > src/kcore/krw.c <<'KRW_EOF'
 #include "krw.h"
 #include <stdlib.h>
@@ -350,15 +349,19 @@ cat > src/game/ue4.h <<'UE4H_EOF'
 #pragma once
 #include <stdint.h>
 #include "krw.h"
+
 typedef struct { float x, y; } Vec2;
+
 #define BONE_N 15
 #define MAX_ENT 64
 #define MAX_LOOT 128
+
 typedef struct {
     uint64_t pawn; RVec3 world; float dist;
     int team; int is_bot; int yaw; float hp;
     char op[32]; RVec3 bones[BONE_N];
 } EntOut;
+
 #define LT_BOX 0
 #define LT_GUN 1
 #define LT_BAG 2
@@ -366,16 +369,41 @@ typedef struct {
 #define LT_MED 4
 #define LT_ARMOR 5
 #define LT_ITEM 6
+
 typedef struct {
     uint64_t actor; RVec3 world; float dist;
     int rarity; int type; char name[40];
 } LootOut;
+
+typedef struct {
+    int uw_level;
+    int uw_gi;
+    int lvl_actors;
+    int lvl_cnt;
+    int actor_root;
+    int root_loc;
+    int pawn_ps;
+    int pawn_ctrl;
+    int ctrl_rot;
+    int gi_local;
+    int lp_pc;
+    int pc_cam;
+    int cam_cache;
+    int pov_loc;
+    int pov_rot;
+    int pov_fov;
+} Ue4Off;
+
 typedef struct {
     uint64_t task, base, gworld, self_pawn;
     RVec3 pov_loc;
     float pov_pitch, pov_yaw, fov;
     int sw, sh, ready;
+    Ue4Off off;
+    int ver;
+    int reflect_ok;
 } Ue4Ctx;
+
 int ue4_setup(Ue4Ctx *c);
 int ue4_scan(Ue4Ctx *c, EntOut *out, int max);
 int ue4_w2s(Ue4Ctx *c, RVec3 w, Vec2 *s);
@@ -387,167 +415,363 @@ cat > src/game/ue4.c <<'UE4_EOF'
 #include <math.h>
 #include <string.h>
 
-#define OFF_UWORLD_LEVEL 0x30
-#define OFF_LEVEL_ACTORS 0xA0
-#define OFF_LEVEL_CNT    0xA8
-#define OFF_ACTOR_ROOT   0x1B0
-#define OFF_ROOT_LOC     0x1A0
-#define OFF_PAWN_PS      0x2B0
-#define OFF_GI_LOCAL     0x38
-#define OFF_LP_PC        0x30
-#define OFF_PC_CAM       0x2E0
-#define OFF_CAM_CACHE    0x1A0
-#define OFF_POV_LOC      0x10
-#define OFF_POV_ROT      0x1C
-#define OFF_POV_FOV      0x28
 #define D2R 0.0174532925199433f
 
-static int look_uworld(uint64_t u){
-  if(u<0x100000000ULL||u>0x3000000000ULL)return 0;
-  uint64_t l=kread_ptr(u+OFF_UWORLD_LEVEL);
-  if(l<0x100000000ULL||l>0x3000000000ULL)return 0;
-  uint64_t a=kread_ptr(l+OFF_LEVEL_ACTORS);
-  if(a<0x100000000ULL||a>0x3000000000ULL)return 0;
-  int c=(int)r32(l+OFF_LEVEL_CNT);
-  if(c<1||c>200000)return 0;
-  return 1;
-}
+#define OBJ_CLASS    0x10
+#define OBJ_NAME     0x18
+#define STRUCT_SUPER 0x40
+#define STRUCT_CHILD 0x48
+#define PROP_OFFSET  0x4C
+#define FIELD_NEXT   0x28
 
-static uint64_t scan_gworld(Ue4Ctx*c){
-  for(uint64_t a=c->base+0x1000000ULL;a<c->base+0x6000000ULL;a+=8){
-    uint64_t v=0;
-    if(row_read_task(c->task,a,&v,8)!=0)continue;
-    if(look_uworld(v))return v;
-  }
-  return 0;
-}
+static const Ue4Off DEF427 = {
+    0x30, 0x1B8, 0xA0, 0xA8, 0x1B0, 0x1A0,
+    0x2B0, 0x2A8, 0x2E4,
+    0x38, 0x30, 0x2E0, 0x1A0,
+    0x10, 0x1C, 0x28
+};
+static const Ue4Off DEF50 = {
+    0x38, 0x1C0, 0xA8, 0xB0, 0x1B8, 0x1A0,
+    0x2C0, 0x2B8, 0x2F0,
+    0x40, 0x38, 0x2F0, 0x1B0,
+    0x10, 0x1C, 0x28
+};
+static const Ue4Off DEF426 = {
+    0x30, 0x1B8, 0xA0, 0xA8, 0x198, 0x1A0,
+    0x2B0, 0x2A8, 0x2E4,
+    0x38, 0x30, 0x2E0, 0x1A0,
+    0x10, 0x1C, 0x28
+};
 
-int ue4_setup(Ue4Ctx*c){
-  c->ready=0;
-  uint64_t gw=scan_gworld(c);
-  if(!gw)return -1;
-  c->gworld=gw;
-  uint64_t pc=0;
-  uint64_t gi=kread_ptr(gw+0x1B8);
-  if(gi>0x100000000ULL){
-    uint64_t lp=kread_ptr(gi+OFF_GI_LOCAL);
-    if(lp>0x100000000ULL)pc=kread_ptr(lp+OFF_LP_PC);
-  }
-  if(pc>0x100000000ULL){
-    c->self_pawn=kread_ptr(pc+0x2A8);
-    uint64_t cam=kread_ptr(pc+OFF_PC_CAM);
-    if(cam>0x100000000ULL){
-      RVec3 loc,rot;
-      if(row_read_task(c->task,cam+OFF_CAM_CACHE+OFF_POV_LOC,&loc,12)==0)c->pov_loc=loc;
-      if(row_read_task(c->task,cam+OFF_CAM_CACHE+OFF_POV_ROT,&rot,12)==0){
-        c->pov_pitch=rot.x;c->pov_yaw=rot.y;
-      }
-      float f=0;
-      if(row_read_task(c->task,cam+OFF_CAM_CACHE+OFF_POV_FOV,&f,4)==0){
-        if(f>30.0f&&f<140.0f)c->fov=f;
-      }
+static int okp(uint64_t p) { return p > 0x100000000ULL && p < 0x3000000000ULL; }
+
+static int prop_in_class(uint64_t cls, const char *name) {
+    uint64_t first = kread_ptr(cls + STRUCT_CHILD);
+    uint64_t p = first;
+    int g = 0;
+    while (okp(p) && g++ < 600) {
+        char nm[96] = {0};
+        kcd_fname_str(p, nm, 88);
+        if (nm[0] && strcmp(nm, name) == 0) {
+            int o = (int)r32(p + PROP_OFFSET);
+            if (o > 0 && o < 0x4000) return o;
+        }
+        uint64_t nx = kread_ptr(p + FIELD_NEXT);
+        if (nx == first) break;
+        p = nx;
     }
-  }
-  if(c->fov<30.0f||c->fov>140.0f)c->fov=90.0f;
-  if(c->self_pawn){
-    uint64_t root=kread_ptr(c->self_pawn+OFF_ACTOR_ROOT);
-    if(root>0x100000000ULL){
-      RVec3 loc;
-      if(row_read_task(c->task,root+OFF_ROOT_LOC,&loc,12)==0)c->pov_loc=loc;
+    return -1;
+}
+
+static int rf_find(uint64_t obj, const char *name) {
+    if (!okp(obj) || !g_gnames) return -1;
+    uint64_t cls = kread_ptr(obj + OBJ_CLASS);
+    int d = 0;
+    while (okp(cls) && d++ < 12) {
+        int o = prop_in_class(cls, name);
+        if (o > 0) return o;
+        uint64_t sup = kread_ptr(cls + STRUCT_SUPER);
+        if (!okp(sup) || sup == cls) break;
+        cls = sup;
     }
-  }
-  c->ready=1;
-  return 0;
+    return -1;
 }
 
-int ue4_w2s(Ue4Ctx*c,RVec3 w,Vec2*s){
-  float dx=w.x-c->pov_loc.x,dy=w.y-c->pov_loc.y,dz=w.z-c->pov_loc.z;
-  float cy=cosf(-c->pov_yaw*D2R),sy=sinf(-c->pov_yaw*D2R);
-  float x1=dx*cy-dy*sy,y1=dx*sy+dy*cy,z1=dz;
-  float cp=cosf(c->pov_pitch*D2R),sp=sinf(c->pov_pitch*D2R);
-  float x2=x1*cp-z1*sp,z2=x1*sp+z1*cp,y2=y1;
-  if(x2<1.0f)return 0;
-  float sc=(c->sh*0.5f)/tanf(c->fov*D2R*0.5f);
-  s->x=c->sw*0.5f+(y2*sc/x2);
-  s->y=c->sh*0.5f-(z2*sc/x2);
-  return 1;
+static int rf_find_any(uint64_t obj, const char *a, const char *b) {
+    int o = rf_find(obj, a);
+    if (o > 0) return o;
+    if (b) { o = rf_find(obj, b); if (o > 0) return o; }
+    return -1;
 }
 
-static void build_bones(EntOut*e){
-  float h=176.0f;
-  RVec3 b=e->world;
-  float yr=(float)e->yaw*D2R;
-  float rx=cosf(yr)*20.0f,ry=sinf(yr)*20.0f;
-  e->bones[0]=(RVec3){b.x,b.y,b.z+h};
-  e->bones[1]=(RVec3){b.x,b.y,b.z+h*0.90f};
-  e->bones[2]=(RVec3){b.x,b.y,b.z+h*0.80f};
-  e->bones[3]=(RVec3){b.x-rx,b.y-ry,b.z+h*0.80f};
-  e->bones[4]=(RVec3){b.x-rx*1.7f,b.y-ry*1.7f,b.z+h*0.60f};
-  e->bones[5]=(RVec3){b.x-rx*2.2f,b.y-ry*2.2f,b.z+h*0.45f};
-  e->bones[6]=(RVec3){b.x+rx,b.y+ry,b.z+h*0.80f};
-  e->bones[7]=(RVec3){b.x+rx*1.7f,b.y+ry*1.7f,b.z+h*0.60f};
-  e->bones[8]=(RVec3){b.x+rx*2.2f,b.y+ry*2.2f,b.z+h*0.45f};
-  e->bones[9]=(RVec3){b.x,b.y,b.z+h*0.50f};
-  e->bones[10]=(RVec3){b.x-rx*0.6f,b.y-ry*0.6f,b.z+h*0.50f};
-  e->bones[11]=(RVec3){b.x+rx*0.6f,b.y+ry*0.6f,b.z+h*0.50f};
-  e->bones[12]=(RVec3){b.x-rx*0.6f,b.y-ry*0.6f,b.z+h*0.26f};
-  e->bones[13]=(RVec3){b.x+rx*0.6f,b.y+ry*0.6f,b.z+h*0.26f};
-  e->bones[14]=(RVec3){b.x,b.y,b.z};
+static int look_uworld(Ue4Ctx *c, uint64_t u) {
+    if (!okp(u)) return 0;
+    uint64_t l = kread_ptr(u + c->off.uw_level);
+    if (!okp(l)) return 0;
+    uint64_t a = kread_ptr(l + c->off.lvl_actors);
+    if (!okp(a)) return 0;
+    int n = (int)r32(l + c->off.lvl_cnt);
+    if (n < 1 || n > 200000) return 0;
+    return 1;
 }
 
-static void op_from_class(uint64_t pawn,char*out){
-  out[0]=0;
-  char buf[80]={0};
-  if(kcd_class_name(pawn,buf,72)<=0)return;
-  char*p=buf;
-  if(strncmp(p,"BP_",3)==0)p+=3;
-  if(strncmp(p,"Operator_",9)==0)p+=9;
-  if(strncmp(p,"Op_",3)==0)p+=3;
-  int n=(int)strlen(p);
-  if(n>2&&strcmp(p+n-2,"_C")==0)p[n-2]=0;
-  strncpy(out,p,28);out[28]=0;
+static uint64_t scan_gworld(Ue4Ctx *c) {
+    for (uint64_t a = c->base + 0x1000000ULL; a < c->base + 0xA000000ULL; a += 8) {
+        uint64_t v = 0;
+        if (row_read_task(c->task, a, &v, 8) != 0) continue;
+        if (look_uworld(c, v)) return v;
+    }
+    return 0;
 }
 
-int ue4_scan(Ue4Ctx*c,EntOut*out,int max){
-  if(!c->ready||!c->gworld)return 0;
-  uint64_t l=kread_ptr(c->gworld+OFF_UWORLD_LEVEL);
-  if(l<0x100000000ULL)return 0;
-  uint64_t arr=kread_ptr(l+OFF_LEVEL_ACTORS);
-  if(arr<0x100000000ULL)return 0;
-  int cnt=(int)r32(l+OFF_LEVEL_CNT);
-  if(cnt<1)return 0;
-  if(cnt>4000)cnt=4000;
-  uint64_t self=c->self_pawn;
-  int n=0;
-  for(int i=0;i<cnt&&n<max;i++){
-    uint64_t a=0;
-    if(row_read_task(c->task,arr+(uint64_t)i*8,&a,8)!=0)continue;
-    if(a<0x100000000ULL||a>0x3000000000ULL)continue;
-    if(a==self)continue;
-    uint64_t ps=kread_ptr(a+OFF_PAWN_PS);
-    if(ps<0x100000000ULL)continue;
-    uint64_t root=kread_ptr(a+OFF_ACTOR_ROOT);
-    if(root<0x100000000ULL)continue;
-    RVec3 loc;
-    if(row_read_task(c->task,root+OFF_ROOT_LOC,&loc,12)!=0)continue;
-    if(loc.x<-1000000.0f||loc.x>1000000.0f)continue;
-    if(loc.z<-100000.0f||loc.z>100000.0f)continue;
-    float dx=loc.x-c->pov_loc.x,dy=loc.y-c->pov_loc.y,dz=loc.z-c->pov_loc.z;
-    EntOut*e=&out[n];
-    memset(e,0,sizeof(*e));
-    e->pawn=a;
-    e->world=loc;
-    e->dist=sqrtf(dx*dx+dy*dy+dz*dz)/100.0f;
-    e->is_bot=kcd_is_bot(a);
-    e->team=kcd_team_of(a);
-    e->yaw=kcd_yaw_of(a);
-    if(e->yaw<0)e->yaw=0;
-    e->hp=kcd_health_of(a);
-    op_from_class(a,e->op);
-    build_bones(e);
-    n++;
-  }
-  return n;
+static uint64_t scan_gworld_slow(Ue4Ctx *c) {
+    if (!g_gnames) return 0;
+    for (uint64_t a = c->base + 0x1000000ULL; a < c->base + 0x8000000ULL; a += 0x100) {
+        uint64_t v = 0;
+        if (row_read_task(c->task, a, &v, 8) != 0) continue;
+        if (!okp(v)) continue;
+        uint64_t cls = kread_ptr(v + OBJ_CLASS);
+        if (!okp(cls)) continue;
+        int32_t nm = (int32_t)r32(cls + OBJ_NAME);
+        if (nm < 0 || nm > 0x1000000) continue;
+        int lvl = rf_find(v, "PersistentLevel");
+        if (lvl <= 0) continue;
+        uint64_t l = kread_ptr(v + lvl);
+        if (!okp(l)) continue;
+        int act = rf_find(l, "Actors");
+        if (act <= 0) continue;
+        uint64_t arr = kread_ptr(l + act);
+        if (!okp(arr)) continue;
+        int cnt = (int)r32(l + act + 8);
+        if (cnt < 1 || cnt > 200000) continue;
+        c->off.uw_level   = lvl;
+        c->off.lvl_actors = act;
+        c->off.lvl_cnt    = act + 8;
+        return v;
+    }
+    return 0;
+}
+
+static int auto_offsets(Ue4Ctx *c) {
+    uint64_t gw = c->gworld;
+    int hit = 0;
+    int o = rf_find(gw, "PersistentLevel");
+    if (o > 0) { c->off.uw_level = o; hit++; }
+    o = rf_find(gw, "OwningGameInstance");
+    if (o > 0) { c->off.uw_gi = o; hit++; }
+
+    uint64_t lvl = kread_ptr(gw + c->off.uw_level);
+    if (!okp(lvl)) return hit;
+
+    o = rf_find(lvl, "Actors");
+    if (o > 0) { c->off.lvl_actors = o; c->off.lvl_cnt = o + 8; hit++; }
+
+    uint64_t arr = kread_ptr(lvl + c->off.lvl_actors);
+    int cnt = (int)r32(lvl + c->off.lvl_cnt);
+    if (!okp(arr) || cnt < 1) return hit;
+    if (cnt > 5000) cnt = 5000;
+
+    uint64_t any = 0, pawn = 0;
+    for (int i = 0; i < cnt; i++) {
+        uint64_t a = kread_ptr(arr + (uint64_t)i * 8);
+        if (!okp(a)) continue;
+        if (!any) any = a;
+        char cn[80] = {0};
+        if (kcd_class_name(a, cn, 72) > 0) {
+            if (strstr(cn, "Character") || strstr(cn, "Pawn")) { pawn = a; break; }
+        }
+    }
+
+    if (any) {
+        o = rf_find(any, "RootComponent");
+        if (o > 0) { c->off.actor_root = o; hit++; }
+        uint64_t rc = kread_ptr(any + c->off.actor_root);
+        if (okp(rc)) {
+            o = rf_find(rc, "RelativeLocation");
+            if (o > 0) { c->off.root_loc = o; hit++; }
+        }
+    }
+    if (pawn) {
+        o = rf_find(pawn, "PlayerState");
+        if (o > 0) { c->off.pawn_ps = o; hit++; }
+        o = rf_find(pawn, "Controller");
+        if (o > 0) { c->off.pawn_ctrl = o; hit++; }
+        uint64_t ctrl = kread_ptr(pawn + c->off.pawn_ctrl);
+        if (okp(ctrl)) {
+            o = rf_find(ctrl, "ControlRotation");
+            if (o > 0) { c->off.ctrl_rot = o + 4; hit++; }
+        }
+    }
+
+    uint64_t gi = kread_ptr(gw + c->off.uw_gi);
+    if (okp(gi)) {
+        o = rf_find(gi, "LocalPlayers");
+        if (o > 0) { c->off.gi_local = o; hit++; }
+        uint64_t lp = kread_ptr(gi + c->off.gi_local);
+        if (okp(lp)) {
+            o = rf_find(lp, "PlayerController");
+            if (o > 0) { c->off.lp_pc = o; hit++; }
+            uint64_t pc = kread_ptr(lp + c->off.lp_pc);
+            if (okp(pc)) {
+                o = rf_find(pc, "PlayerCameraManager");
+                if (o > 0) { c->off.pc_cam = o; hit++; }
+                uint64_t cam = kread_ptr(pc + c->off.pc_cam);
+                if (okp(cam)) {
+                    o = rf_find_any(cam, "CameraCachePrivate", "CameraCache");
+                    if (o > 0) { c->off.cam_cache = o; hit++; }
+                }
+            }
+        }
+    }
+    return hit;
+}
+
+static int read_pov(Ue4Ctx *c) {
+    uint64_t gw = c->gworld;
+    uint64_t pc = 0;
+    uint64_t gi = kread_ptr(gw + c->off.uw_gi);
+    if (okp(gi)) {
+        uint64_t lp = kread_ptr(gi + c->off.gi_local);
+        if (okp(lp)) pc = kread_ptr(lp + c->off.lp_pc);
+    }
+    if (okp(pc)) {
+        c->self_pawn = kread_ptr(pc + c->off.pawn_ctrl);
+        uint64_t cam = kread_ptr(pc + c->off.pc_cam);
+        if (okp(cam)) {
+            RVec3 loc, rot;
+            if (row_read_task(c->task, cam + c->off.cam_cache + c->off.pov_loc, &loc, 12) == 0)
+                c->pov_loc = loc;
+            if (row_read_task(c->task, cam + c->off.cam_cache + c->off.pov_rot, &rot, 12) == 0) {
+                c->pov_pitch = rot.x;
+                c->pov_yaw = rot.y;
+            }
+            float f = 0;
+            if (row_read_task(c->task, cam + c->off.cam_cache + c->off.pov_fov, &f, 4) == 0) {
+                if (f > 30.0f && f < 140.0f) c->fov = f;
+            }
+        }
+    }
+    if (c->fov < 30.0f || c->fov > 140.0f) c->fov = 90.0f;
+    if (c->self_pawn) {
+        uint64_t root = kread_ptr(c->self_pawn + c->off.actor_root);
+        if (okp(root)) {
+            RVec3 loc;
+            if (row_read_task(c->task, root + c->off.root_loc, &loc, 12) == 0)
+                c->pov_loc = loc;
+        }
+    }
+    if (fabsf(c->pov_loc.x) > 1000000.0f) return 0;
+    if (fabsf(c->pov_loc.z) > 100000.0f) return 0;
+    return 1;
+}
+
+int ue4_setup(Ue4Ctx *c) {
+    c->ready = 0;
+    c->reflect_ok = 0;
+    const Ue4Off *seeds[3] = { &DEF427, &DEF50, &DEF426 };
+
+    for (int i = 0; i < 3; i++) {
+        c->off = *seeds[i];
+        c->ver = i;
+        c->fov = 90.0f;
+        c->self_pawn = 0;
+        uint64_t gw = scan_gworld(c);
+        if (!gw) continue;
+        c->gworld = gw;
+        c->reflect_ok = auto_offsets(c);
+        if (!read_pov(c)) continue;
+        c->ready = 1;
+        return i;
+    }
+
+    c->off = DEF427;
+    c->ver = 9;
+    c->fov = 90.0f;
+    c->self_pawn = 0;
+    uint64_t gw = scan_gworld_slow(c);
+    if (!gw) return -1;
+    c->gworld = gw;
+    c->reflect_ok = auto_offsets(c);
+    if (!read_pov(c)) return -1;
+    c->ready = 1;
+    return 9;
+}
+
+int ue4_w2s(Ue4Ctx *c, RVec3 w, Vec2 *s) {
+    float dx = w.x - c->pov_loc.x, dy = w.y - c->pov_loc.y, dz = w.z - c->pov_loc.z;
+    float cy = cosf(-c->pov_yaw * D2R), sy = sinf(-c->pov_yaw * D2R);
+    float x1 = dx * cy - dy * sy, y1 = dx * sy + dy * cy, z1 = dz;
+    float cp = cosf(c->pov_pitch * D2R), sp = sinf(c->pov_pitch * D2R);
+    float x2 = x1 * cp - z1 * sp, z2 = x1 * sp + z1 * cp, y2 = y1;
+    if (x2 < 1.0f) return 0;
+    float sc = (c->sh * 0.5f) / tanf(c->fov * D2R * 0.5f);
+    s->x = c->sw * 0.5f + (y2 * sc / x2);
+    s->y = c->sh * 0.5f - (z2 * sc / x2);
+    return 1;
+}
+
+static void build_bones(EntOut *e) {
+    float h = 176.0f;
+    RVec3 b = e->world;
+    float yr = (float)e->yaw * D2R;
+    float rx = cosf(yr) * 20.0f, ry = sinf(yr) * 20.0f;
+    e->bones[0]  = (RVec3){ b.x, b.y, b.z + h };
+    e->bones[1]  = (RVec3){ b.x, b.y, b.z + h * 0.90f };
+    e->bones[2]  = (RVec3){ b.x, b.y, b.z + h * 0.80f };
+    e->bones[3]  = (RVec3){ b.x - rx, b.y - ry, b.z + h * 0.80f };
+    e->bones[4]  = (RVec3){ b.x - rx * 1.7f, b.y - ry * 1.7f, b.z + h * 0.60f };
+    e->bones[5]  = (RVec3){ b.x - rx * 2.2f, b.y - ry * 2.2f, b.z + h * 0.45f };
+    e->bones[6]  = (RVec3){ b.x + rx, b.y + ry, b.z + h * 0.80f };
+    e->bones[7]  = (RVec3){ b.x + rx * 1.7f, b.y + ry * 1.7f, b.z + h * 0.60f };
+    e->bones[8]  = (RVec3){ b.x + rx * 2.2f, b.y + ry * 2.2f, b.z + h * 0.45f };
+    e->bones[9]  = (RVec3){ b.x, b.y, b.z + h * 0.50f };
+    e->bones[10] = (RVec3){ b.x - rx * 0.6f, b.y - ry * 0.6f, b.z + h * 0.50f };
+    e->bones[11] = (RVec3){ b.x + rx * 0.6f, b.y + ry * 0.6f, b.z + h * 0.50f };
+    e->bones[12] = (RVec3){ b.x - rx * 0.6f, b.y - ry * 0.6f, b.z + h * 0.26f };
+    e->bones[13] = (RVec3){ b.x + rx * 0.6f, b.y + ry * 0.6f, b.z + h * 0.26f };
+    e->bones[14] = (RVec3){ b.x, b.y, b.z };
+}
+
+static void op_from_class(uint64_t pawn, char *out) {
+    out[0] = 0;
+    char buf[80] = {0};
+    if (kcd_class_name(pawn, buf, 72) <= 0) return;
+    char *p = buf;
+    if (strncmp(p, "BP_", 3) == 0) p += 3;
+    if (strncmp(p, "Operator_", 9) == 0) p += 9;
+    if (strncmp(p, "Op_", 3) == 0) p += 3;
+    int n = (int)strlen(p);
+    if (n > 2 && strcmp(p + n - 2, "_C") == 0) p[n - 2] = 0;
+    strncpy(out, p, 28);
+    out[28] = 0;
+}
+
+int ue4_scan(Ue4Ctx *c, EntOut *out, int max) {
+    if (!c->ready || !c->gworld) return 0;
+    uint64_t l = kread_ptr(c->gworld + c->off.uw_level);
+    if (!okp(l)) return 0;
+    uint64_t arr = kread_ptr(l + c->off.lvl_actors);
+    if (!okp(arr)) return 0;
+    int cnt = (int)r32(l + c->off.lvl_cnt);
+    if (cnt < 1) return 0;
+    if (cnt > 4000) cnt = 4000;
+
+    uint64_t self = c->self_pawn;
+    int n = 0;
+    for (int i = 0; i < cnt && n < max; i++) {
+        uint64_t a = 0;
+        if (row_read_task(c->task, arr + (uint64_t)i * 8, &a, 8) != 0) continue;
+        if (!okp(a)) continue;
+        if (a == self) continue;
+
+        uint64_t ps = kread_ptr(a + c->off.pawn_ps);
+        if (!okp(ps)) continue;
+
+        uint64_t root = kread_ptr(a + c->off.actor_root);
+        if (!okp(root)) continue;
+
+        RVec3 loc;
+        if (row_read_task(c->task, root + c->off.root_loc, &loc, 12) != 0) continue;
+        if (loc.x < -1000000.0f || loc.x > 1000000.0f) continue;
+        if (loc.z < -100000.0f || loc.z > 100000.0f) continue;
+
+        float dx = loc.x - c->pov_loc.x, dy = loc.y - c->pov_loc.y, dz = loc.z - c->pov_loc.z;
+
+        EntOut *e = &out[n];
+        memset(e, 0, sizeof(*e));
+        e->pawn = a;
+        e->world = loc;
+        e->dist = sqrtf(dx * dx + dy * dy + dz * dz) / 100.0f;
+        e->is_bot = kcd_is_bot(a);
+        e->team = kcd_team_of(a);
+        e->yaw = kcd_yaw_of(a);
+        if (e->yaw < 0) e->yaw = 0;
+        e->hp = kcd_health_of(a);
+        op_from_class(a, e->op);
+        build_bones(e);
+        n++;
+    }
+    return n;
 }
 
 static int kw_hit(const char *s, const char *k) {
@@ -599,11 +823,11 @@ static int loot_rarity(uint64_t actor) {
 
 int ue4_scan_loot(Ue4Ctx *c, LootOut *out, int max) {
     if (!c->ready || !c->gworld) return 0;
-    uint64_t l = kread_ptr(c->gworld + OFF_UWORLD_LEVEL);
-    if (l < 0x100000000ULL) return 0;
-    uint64_t arr = kread_ptr(l + OFF_LEVEL_ACTORS);
-    if (arr < 0x100000000ULL) return 0;
-    int cnt = (int)r32(l + OFF_LEVEL_CNT);
+    uint64_t l = kread_ptr(c->gworld + c->off.uw_level);
+    if (!okp(l)) return 0;
+    uint64_t arr = kread_ptr(l + c->off.lvl_actors);
+    if (!okp(arr)) return 0;
+    int cnt = (int)r32(l + c->off.lvl_cnt);
     if (cnt < 1) return 0;
     if (cnt > 6000) cnt = 6000;
 
@@ -611,32 +835,29 @@ int ue4_scan_loot(Ue4Ctx *c, LootOut *out, int max) {
     for (int i = 0; i < cnt && n < max; i++) {
         uint64_t a = 0;
         if (row_read_task(c->task, arr + (uint64_t)i * 8, &a, 8) != 0) continue;
-        if (a < 0x100000000ULL || a > 0x3000000000ULL) continue;
+        if (!okp(a)) continue;
         if (a == c->self_pawn) continue;
 
         char cls[96] = {0};
         if (kcd_class_name(a, cls, 88) <= 0) continue;
-
         int tp = loot_type(cls);
         if (tp < 0) continue;
 
-        uint64_t ps = kread_ptr(a + OFF_PAWN_PS);
-        if (ps > 0x100000000ULL) continue;
+        uint64_t ps = kread_ptr(a + c->off.pawn_ps);
+        if (okp(ps)) continue;
 
         int rar = loot_rarity(a);
         if (rar <= 0) rar = 3;
 
-        uint64_t root = kread_ptr(a + OFF_ACTOR_ROOT);
-        if (root < 0x100000000ULL) continue;
+        uint64_t root = kread_ptr(a + c->off.actor_root);
+        if (!okp(root)) continue;
 
         RVec3 loc;
-        if (row_read_task(c->task, root + OFF_ROOT_LOC, &loc, 12) != 0) continue;
+        if (row_read_task(c->task, root + c->off.root_loc, &loc, 12) != 0) continue;
         if (loc.x < -1000000.0f || loc.x > 1000000.0f) continue;
         if (loc.z < -100000.0f || loc.z > 100000.0f) continue;
 
-        float dx = loc.x - c->pov_loc.x;
-        float dy = loc.y - c->pov_loc.y;
-        float dz = loc.z - c->pov_loc.z;
+        float dx = loc.x - c->pov_loc.x, dy = loc.y - c->pov_loc.y, dz = loc.z - c->pov_loc.z;
 
         LootOut *o = &out[n];
         memset(o, 0, sizeof(*o));
@@ -745,7 +966,7 @@ static void *scan_loop(void *arg) {
             if (!g_ctx.base) { usleep(300000); continue; }
             g_ctx.sw = (int)[UIScreen mainScreen].bounds.size.width;
             g_ctx.sh = (int)[UIScreen mainScreen].bounds.size.height;
-            if (ue4_setup(&g_ctx) != 0) { g_game_pid = 0; usleep(500000); continue; }
+            if (ue4_setup(&g_ctx) != 0 && !g_ctx.ready) { g_game_pid = 0; usleep(500000); continue; }
             if (g_ps_n >= 3) {
                 int sel = cfg_i(@"teamid_off", 0);
                 if (sel > 0) g_off_teamid = 0x2B8 + (sel - 1) * 8;
@@ -833,7 +1054,6 @@ static void *scan_loop(void *arg) {
         CGRect box = CGRectMake(ph.x - w * 0.5f, ph.y, w, h);
         BOOL me = (e->team == g_my_team);
         UIColor *c = team_color(e->team, me);
-
         if (showbox) {
             CGContextSetStrokeColorWithColor(ctx, c.CGColor);
             CGContextSetLineWidth(ctx, th);
@@ -946,7 +1166,7 @@ static void make_esp(void) {
 @end
 
 static UILabel *mklab(CGFloat x, CGFloat y, int tag) {
-    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(x, y, 420, 26)];
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(x, y, 440, 26)];
     l.textColor = [UIColor whiteColor];
     l.font = [UIFont boldSystemFontOfSize:(CGFloat)cfg_i(@"text_size", 13)];
     l.userInteractionEnabled = YES;
@@ -1054,7 +1274,7 @@ static void panel_build(void) {
     if (g_panel) return;
     CGRect sc = [UIScreen mainScreen].bounds;
     CGFloat W = 340;
-    CGFloat H = MIN(sc.size.height - 120, 740);
+    CGFloat H = MIN(sc.size.height - 110, 760);
     g_panel = [[UIWindow alloc] initWithFrame:CGRectMake((sc.size.width - W) / 2,
                                                         (sc.size.height - H) / 2, W, H)];
     g_panel.windowLevel = UIWindowLevelAlert + 1000;
@@ -1132,13 +1352,15 @@ static void panel_refresh(void) {
         [g_psv addSubview:b];
         y += 42;
     }
+    NSString *vstr = g_ctx.ver == 9 ? @"慢扫" :
+                     [NSString stringWithFormat:@"预%d", g_ctx.ver];
     UILabel *st = [[UILabel alloc] initWithFrame:CGRectMake(16, y + 8, 320, 22)];
-    st.text = [NSString stringWithFormat:@"内核: %@  名字池: %@  队伍偏移: 0x%X",
+    st.text = [NSString stringWithFormat:@"内核:%@ 池:%@ 队:0x%X 引擎:%@ 反射:%d",
                g_kfd_ready ? @"正常" : @"异常",
-               g_gnames ? @"正常" : @"未找到",
-               g_off_teamid];
+               g_gnames ? @"正常" : @"无",
+               g_off_teamid, vstr, g_ctx.reflect_ok];
     st.textColor = g_kfd_ready ? [UIColor greenColor] : [UIColor redColor];
-    st.font = [UIFont fontWithName:@"PingFangSC-Regular" size:12];
+    st.font = [UIFont fontWithName:@"PingFangSC-Regular" size:11];
     [g_psv addSubview:st];
     y += 34;
     g_psv.contentSize = CGSizeMake(340, y);
@@ -1340,6 +1562,7 @@ __attribute__((constructor)) static void kcd_boot(void) {
     });
 }
 OX2_EOF
+
 cat > src/ent.plist <<'PL1_EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
