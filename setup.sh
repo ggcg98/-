@@ -168,13 +168,15 @@ int row_up(void){
   for(int a=0;a<6;a++){
     g_open_tries=a+1;
     if(try_open(0)||try_open(1)||try_open(2)){
-      struct kfd*kd=(struct kfd*)g_h;
-      g_kslide=kd->info.kernel.kernel_slide;
+      uint64_t ks=0;
+      KR(g_h,(uint64_t)g_h,&ks,8);
+      g_kslide=ks;
       g_kbase=0xFFFFFFF007004000ULL+g_kslide;
-      g_kernel_pmap=kd->info.kernel.kernel_pmap;
+      g_kernel_pmap=0;
       g_kfd_ready=1;
       g_open_tries=-1;
-      fprintf(stderr,"[kcd] kopen OK try=%d\n",a+1);
+      fprintf(stderr,"[kcd] kopen OK try=%d slide=%llx kbase=%llx\n",
+              a+1,(unsigned long long)ks,(unsigned long long)g_kbase);
       return 0;
     }
     fprintf(stderr,"[kcd] kopen fail try=%d\n",a+1);
@@ -1092,17 +1094,27 @@ static const char *loot_cn(const char *en) {
 static void *scan_loop(void *arg) {
     (void)arg;
     if (row_up() != 0) return NULL;
+
     g_physmap_base = 0;
-    uint64_t ttep = 0;
-    kread_buf(g_kernel_pmap + 0x08, &ttep, 8);
-    ttep &= 0x0000FFFFFFFFC000ULL;
-    for (int i = 0; i < 512 && ttep; i++) {
-        uint64_t e = 0;
-        kread_buf(ttep + (uint64_t)i * 8, &e, 8);
-        if ((e & 3) == 3 && (e & 0x0000FFFFFFE00000ULL) == 0) {
-            g_physmap_base = 0xfffffff000000000ULL + ((uint64_t)i << 30);
-            break;
+    {
+        static const uint64_t cb[] = {
+            0xfffffff000000000ULL,
+            0xffffffe000000000ULL,
+            0xfffffe0000000000ULL,
+            0xffffffc000000000ULL
+        };
+        for (int ci = 0; ci < 4 && !g_physmap_base; ci++) {
+            uint64_t b = cb[ci];
+            uint32_t magic = 0;
+            KR(g_h, b + 0x1000, &magic, 4);
+            fprintf(stderr, "[kcd] physmap try %llx magic=%x\n",
+                    (unsigned long long)b, magic);
+            if (magic != 0 && magic != 0xFFFFFFFF) {
+                g_physmap_base = b;
+                break;
+            }
         }
+        fprintf(stderr, "[kcd] physmap = %llx\n", (unsigned long long)g_physmap_base);
     }
     kcd_gnames_scan();
 
@@ -1118,19 +1130,24 @@ static void *scan_loop(void *arg) {
             g_game_pid = 0;
             memset(&g_ctx, 0, sizeof(g_ctx));
             if (row_up() == 0) {
-                uint64_t t2 = 0;
-                kread_buf(g_kernel_pmap + 0x08, &t2, 8);
-                t2 &= 0x0000FFFFFFFFC000ULL;
-                for (int i = 0; i < 512 && t2; i++) {
-                    uint64_t e = 0;
-                    kread_buf(t2 + (uint64_t)i * 8, &e, 8);
-                    if ((e & 3) == 3 && (e & 0x0000FFFFFFE00000ULL) == 0) {
-                        g_physmap_base = 0xfffffff000000000ULL + ((uint64_t)i << 30);
+                g_physmap_base = 0;
+                static const uint64_t cb2[] = {
+                    0xfffffff000000000ULL,
+                    0xffffffe000000000ULL,
+                    0xfffffe0000000000ULL
+                };
+                for (int ci = 0; ci < 3 && !g_physmap_base; ci++) {
+                    uint64_t b = cb2[ci];
+                    uint32_t magic = 0;
+                    KR(g_h, b + 0x1000, &magic, 4);
+                    if (magic != 0 && magic != 0xFFFFFFFF) {
+                        g_physmap_base = b;
                         break;
                     }
                 }
                 kcd_gnames_scan();
-                fprintf(stderr, "[kcd] restart OK\n");
+                fprintf(stderr, "[kcd] restart OK physmap=%llx\n",
+                        (unsigned long long)g_physmap_base);
             } else {
                 fprintf(stderr, "[kcd] restart FAIL\n");
             }
@@ -1866,6 +1883,13 @@ for r, _, fs in os.walk('kcore/kfd'):
                 n += 1
 print('patched headers:', n)
 PY
+
+echo "===== DUMP INFO STRUCT ====="
+sed -n '/^struct info/,/^};/p' kcore/kfd/kfd/libkfd/info.h 2>/dev/null | head -40 || true
+echo "--- slide/pmap grep ---"
+grep -rn "kernel_slide\|kernel_pmap" kcore/kfd/kfd/libkfd/ 2>/dev/null | head -10 || true
+echo "--- struct kfd ---"
+find kcore/kfd -name "common.h" -exec sed -n '/^struct kfd/,/^};/p' {} \; 2>/dev/null | head -20 || true
 
 echo "===== COMPILE ====="
 SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
