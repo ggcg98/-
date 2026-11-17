@@ -1878,7 +1878,10 @@ if [ "$KFD_TAG" = "taurine" ]; then
 fi
 echo "  kfd tag: $KFD_TAG  def: $KFD_DEF"
 
-CF="-target $TG -isysroot $SDK -fobjc-arc -w -O1 $KFD_DEF -include stdint.h -include stddef.h -include stdbool.h -Ikcore -Igame -Ikcore/kfd -Ikcore/kfd/libkfd -Ikcore/kfd/libkfd/libkfd -Ikcore/kfd/libkfd/common -Ikcore/kfd/libkfd/info -Ikcore/kfd/libkfd/krkw -Ikcore/kfd/libkfd/puaf -Ikcore/kfd/libkfd/perf -Ikcore/kfd/kfd -Ikcore/kfd/kfd/fun -Ikcore/kfd/kfd/libkfd"
+CFBASE="-target $TG -isysroot $SDK -w -O1 $KFD_DEF -include stdint.h -include stddef.h -include stdbool.h -Ikcore -Igame -Ikcore/kfd -Ikcore/kfd/libkfd -Ikcore/kfd/libkfd/libkfd -Ikcore/kfd/libkfd/common -Ikcore/kfd/libkfd/info -Ikcore/kfd/libkfd/krkw -Ikcore/kfd/libkfd/puaf -Ikcore/kfd/libkfd/perf -Ikcore/kfd/kfd -Ikcore/kfd/kfd/fun -Ikcore/kfd/kfd/libkfd"
+
+CF="-fobjc-arc $CFBASE"
+CFNO="-fno-objc-arc $CFBASE"
 
 rm -rf obj release
 mkdir -p obj release
@@ -1886,11 +1889,17 @@ mkdir -p obj release
 KFD_C=$(find kcore/kfd -name "*.c" -not -path "*/macos/*" 2>/dev/null | tr '\n' ' ')
 echo "  kfd sources: $KFD_C"
 
-for f in kcore/krw.c game/ue4.c $KFD_C; do
+echo "  kcore/krw.c"
+clang $CF -x objective-c -c kcore/krw.c -o obj/krw.o
+
+echo "  game/ue4.c"
+clang $CF -x objective-c -c game/ue4.c -o obj/ue4.o
+
+for f in $KFD_C; do
   [ -f "$f" ] || continue
   o="obj/$(echo "$f" | tr '/' '_' | sed 's/\.c$/.o/')"
   echo "  $f"
-  clang $CF -c "$f" -o "$o"
+  clang $CFNO -x objective-c -c "$f" -o "$o" || echo "  [skip] $f"
 done
 
 echo "  tweak/Overlay.xm"
