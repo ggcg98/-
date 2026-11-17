@@ -34,13 +34,17 @@ export AR=ar
 
 echo "===== KFD ====="
 rm -rf /tmp/kfdrepo
-git clone --depth 1 https://github.com/Odyssey-Team/Taurine.git /tmp/kfdrepo
+git clone --depth 1 https://github.com/felix-pb/kfd.git /tmp/kfdrepo
 
 echo "===== TREES ====="
 rm -rf src dist
-mkdir -p src/kcore src/game src/tweak src/package/DEBIAN dist
-cp -r /tmp/kfdrepo/Taurine/exploit/kfd/. src/kcore/kfd/
-rm -f src/kcore/kfd/kfd_krw.m src/kcore/kfd/kfd_krw.h
+mkdir -p src/kcore/kfd src/game src/tweak src/package/DEBIAN dist
+cp -r /tmp/kfdrepo/. src/kcore/kfd/
+rm -f src/kcore/kfd/macos_kfd.c
+rm -rf src/kcore/kfd/macos
+echo "--- kfd tree ---"
+find src/kcore/kfd -maxdepth 2 -type f | head -40
+echo "c=$(find src/kcore/kfd -name '*.c' | wc -l) h=$(find src/kcore/kfd -name '*.h' | wc -l)"
 
 cat > src/kcore/krw.h <<'KRWH_EOF'
 #pragma once
@@ -50,6 +54,7 @@ extern uint64_t g_kbase, g_kslide, g_kernel_pmap, g_physmap_base, g_gnames;
 extern int g_kfd_ready;
 extern int g_off_teamid;
 extern int g_ps_n;
+extern int g_open_tries;
 typedef struct { float x, y, z; } RVec3;
 int row_up(void);
 uint64_t r64(uint64_t a);
@@ -77,6 +82,7 @@ cat > src/kcore/krw.c <<'KRW_EOF'
 #include "krw.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #define OFF_PMAP_TTEP   0x08
 #define OFF_TASK_MAP    0x28
@@ -105,6 +111,7 @@ int g_kfd_ready=0;
 int g_off_teamid=0x2C0;
 uint64_t g_ps_sample[32];
 int g_ps_n=0;
+int g_open_tries=0;
 static uint64_t g_h=0;
 extern int proc_listpids(unsigned int,unsigned int,void*,int);
 extern int proc_pidpath(int,void*,unsigned int);
@@ -112,17 +119,27 @@ extern int proc_pidpath(int,void*,unsigned int);
 #if HAVE_KFD
 static int try_open(uint64_t p){uint64_t k=kopen(0x4000,p,2,2);if(k){g_h=k;return 1;}return 0;}
 int row_up(void){
-  if(!try_open(0)&&!try_open(1)&&!try_open(2))return -1;
-  struct kfd*kd=(struct kfd*)g_h;
-  g_kslide=kd->info.kernel.kernel_slide;
-  g_kbase=0xFFFFFFF007004000ULL+g_kslide;
-  g_kernel_pmap=kd->info.kernel.kernel_pmap;
-  g_kfd_ready=1;return 0;
+  for(int a=0;a<6;a++){
+    g_open_tries=a+1;
+    if(try_open(0)||try_open(1)||try_open(2)){
+      struct kfd*kd=(struct kfd*)g_h;
+      g_kslide=kd->info.kernel.kernel_slide;
+      g_kbase=0xFFFFFFF007004000ULL+g_kslide;
+      g_kernel_pmap=kd->info.kernel.kernel_pmap;
+      g_kfd_ready=1;
+      g_open_tries=-1;
+      fprintf(stderr,"[kcd] kopen OK after %d tries\n",a+1);
+      return 0;
+    }
+    fprintf(stderr,"[kcd] kopen failed try=%d\n",a+1);
+    if(a<5) usleep((a+1)*1500000);
+  }
+  return -1;
 }
-uint64_t r64(uint64_t a){uint64_t v=0;kread_(g_h,a,&v,8);return v;}
-uint32_t r32(uint64_t a){uint32_t v=0;kread_(g_h,a,&v,4);return v;}
-float rf32(uint64_t a){float v=0;kread_(g_h,a,&v,4);return v;}
-int kread_buf(uint64_t a,void*b,size_t n){kread_(g_h,a,b,n);return 0;}
+uint64_t r64(uint64_t a){uint64_t v=0;kread(g_h,a,&v,8);return v;}
+uint32_t r32(uint64_t a){uint32_t v=0;kread(g_h,a,&v,4);return v;}
+float rf32(uint64_t a){float v=0;kread(g_h,a,&v,4);return v;}
+int kread_buf(uint64_t a,void*b,size_t n){kread(g_h,a,b,n);return 0;}
 #else
 int row_up(void){return -1;}
 uint64_t r64(uint64_t a){(void)a;return 0;}
@@ -160,19 +177,44 @@ uint64_t row_task_of_pid(int want){
   return 0;
 }
 
-int row_pid_by_name(const char*key){
-  int cap=4096;
-  pid_t*l=(pid_t*)malloc(sizeof(pid_t)*cap);
-  if(!l)return -1;
-  int n=proc_listpids(1,0,l,sizeof(pid_t)*cap)/sizeof(pid_t);
-  int f=-1;char path[1024];
-  for(int i=0;i<n;i++){
-    if(l[i]<=0)continue;
-    memset(path,0,sizeof(path));
-    proc_pidpath(l[i],path,sizeof(path)-1);
-    if(strstr(path,key)){f=l[i];break;}
-  }
-  free(l);return f;
+int row_pid_by_name(const char *key) {
+    static const char *keys[] = {
+        "DeltaForce", "deltaforce", "DeltaForceM",
+        "Delta", "delta", "DFM", "dfm", "tmgp", "Tmgp", NULL
+    };
+    int cap = 4096;
+    pid_t *l = (pid_t *)malloc(sizeof(pid_t) * cap);
+    if (!l) return -1;
+    int n = proc_listpids(1, 0, l, sizeof(pid_t) * cap) / sizeof(pid_t);
+    int by_name = -1;
+    int cand[64];
+    int nc = 0;
+    char path[1024];
+
+    for (int i = 0; i < n; i++) {
+        if (l[i] <= 0) continue;
+        memset(path, 0, sizeof(path));
+        if (proc_pidpath(l[i], path, sizeof(path) - 1) <= 0) continue;
+        if (strstr(path, "/System/")) continue;
+        if (strstr(path, "SpringBoard")) continue;
+        if (strstr(path, "backboardd")) continue;
+        if (!strstr(path, "/Bundle/Application/")) continue;
+        fprintf(stderr, "[kcd] app %d %s\n", l[i], path);
+        if (strstr(path, key)) { by_name = l[i]; break; }
+        for (int k = 0; keys[k]; k++) {
+            if (strstr(path, keys[k])) { by_name = l[i]; break; }
+        }
+        if (by_name > 0) break;
+        if (nc < 64) cand[nc++] = l[i];
+    }
+    free(l);
+    if (by_name > 0) return by_name;
+    if (nc == 0) return -1;
+    if (nc == 1) return cand[0];
+    static int rr = 0;
+    int pick = cand[rr % nc];
+    rr++;
+    return pick;
 }
 
 uint64_t row_base_of_task(uint64_t task){
@@ -349,19 +391,15 @@ cat > src/game/ue4.h <<'UE4H_EOF'
 #pragma once
 #include <stdint.h>
 #include "krw.h"
-
 typedef struct { float x, y; } Vec2;
-
 #define BONE_N 15
 #define MAX_ENT 64
 #define MAX_LOOT 128
-
 typedef struct {
     uint64_t pawn; RVec3 world; float dist;
     int team; int is_bot; int yaw; float hp;
-    char op[32]; RVec3 bones[BONE_N];
+    char op[48]; RVec3 bones[BONE_N];
 } EntOut;
-
 #define LT_BOX 0
 #define LT_GUN 1
 #define LT_BAG 2
@@ -369,41 +407,26 @@ typedef struct {
 #define LT_MED 4
 #define LT_ARMOR 5
 #define LT_ITEM 6
-
 typedef struct {
     uint64_t actor; RVec3 world; float dist;
-    int rarity; int type; char name[40];
+    int rarity; int type; char name[48];
 } LootOut;
-
 typedef struct {
-    int uw_level;
-    int uw_gi;
-    int lvl_actors;
-    int lvl_cnt;
-    int actor_root;
-    int root_loc;
-    int pawn_ps;
-    int pawn_ctrl;
-    int ctrl_rot;
-    int gi_local;
-    int lp_pc;
-    int pc_cam;
-    int cam_cache;
-    int pov_loc;
-    int pov_rot;
-    int pov_fov;
+    int uw_level, uw_gi;
+    int lvl_actors, lvl_cnt;
+    int actor_root, root_loc;
+    int pawn_ps, pawn_ctrl, ctrl_rot;
+    int gi_local, lp_pc, pc_cam, cam_cache;
+    int pov_loc, pov_rot, pov_fov;
 } Ue4Off;
-
 typedef struct {
     uint64_t task, base, gworld, self_pawn;
     RVec3 pov_loc;
     float pov_pitch, pov_yaw, fov;
     int sw, sh, ready;
     Ue4Off off;
-    int ver;
-    int reflect_ok;
+    int ver, reflect_ok;
 } Ue4Ctx;
-
 int ue4_setup(Ue4Ctx *c);
 int ue4_scan(Ue4Ctx *c, EntOut *out, int max);
 int ue4_w2s(Ue4Ctx *c, RVec3 w, Vec2 *s);
@@ -416,13 +439,12 @@ cat > src/game/ue4.c <<'UE4_EOF'
 #include <string.h>
 
 #define D2R 0.0174532925199433f
-
-#define OBJ_CLASS    0x10
-#define OBJ_NAME     0x18
+#define OBJ_CLASS 0x10
+#define OBJ_NAME 0x18
 #define STRUCT_SUPER 0x40
 #define STRUCT_CHILD 0x48
-#define PROP_OFFSET  0x4C
-#define FIELD_NEXT   0x28
+#define PROP_OFFSET 0x4C
+#define FIELD_NEXT 0x28
 
 static const Ue4Off DEF427 = {
     0x30, 0x1B8, 0xA0, 0xA8, 0x1B0, 0x1A0,
@@ -484,6 +506,59 @@ static int rf_find_any(uint64_t obj, const char *a, const char *b) {
     return -1;
 }
 
+static int u16_to_utf8(const uint16_t *in, int n, char *out, int max) {
+    int j = 0;
+    for (int i = 0; i < n && j < max - 4; i++) {
+        uint32_t ch = in[i];
+        if (ch == 0) break;
+        if (ch < 0x80) out[j++] = (char)ch;
+        else if (ch < 0x800) {
+            out[j++] = (char)(0xC0 | (ch >> 6));
+            out[j++] = (char)(0x80 | (ch & 0x3F));
+        } else {
+            out[j++] = (char)(0xE0 | (ch >> 12));
+            out[j++] = (char)(0x80 | ((ch >> 6) & 0x3F));
+            out[j++] = (char)(0x80 | (ch & 0x3F));
+        }
+    }
+    out[j] = 0;
+    return j;
+}
+
+static int read_ftext_utf8(Ue4Ctx *c, uint64_t addr, char *out, int max) {
+    uint64_t data = kread_ptr(addr);
+    if (!okp(data)) return 0;
+    uint64_t src = kread_ptr(data + 0x28);
+    int32_t len = (int32_t)r32(data + 0x30);
+    if (!okp(src) || len <= 0 || len > 32) return 0;
+    uint16_t buf[36];
+    for (int i = 0; i < len; i++) buf[i] = (uint16_t)r32(src + (uint64_t)i * 2);
+    return u16_to_utf8(buf, len, out, max);
+}
+
+static int read_fstring_utf8(Ue4Ctx *c, uint64_t addr, char *out, int max) {
+    uint64_t src = kread_ptr(addr);
+    int32_t len = (int32_t)r32(addr + 8);
+    if (!okp(src) || len <= 0 || len > 32) return 0;
+    uint16_t buf[36];
+    for (int i = 0; i < len; i++) buf[i] = (uint16_t)r32(src + (uint64_t)i * 2);
+    return u16_to_utf8(buf, len, out, max);
+}
+
+static void try_read_name(Ue4Ctx *c, uint64_t actor, char *out, int max) {
+    static const char *props[] = {
+        "DisplayName", "OperatorName", "CharacterName", "HeroName",
+        "NameText", "PlayerNamePrivate", "PlayerName", NULL
+    };
+    out[0] = 0;
+    for (int k = 0; props[k] && !out[0]; k++) {
+        int o = rf_find(actor, props[k]);
+        if (o <= 0) continue;
+        if (read_ftext_utf8(c, actor + o, out, max) > 0) break;
+        if (read_fstring_utf8(c, actor + o, out, max) > 0) break;
+    }
+}
+
 static int look_uworld(Ue4Ctx *c, uint64_t u) {
     if (!okp(u)) return 0;
     uint64_t l = kread_ptr(u + c->off.uw_level);
@@ -524,9 +599,9 @@ static uint64_t scan_gworld_slow(Ue4Ctx *c) {
         if (!okp(arr)) continue;
         int cnt = (int)r32(l + act + 8);
         if (cnt < 1 || cnt > 200000) continue;
-        c->off.uw_level   = lvl;
+        c->off.uw_level = lvl;
         c->off.lvl_actors = act;
-        c->off.lvl_cnt    = act + 8;
+        c->off.lvl_cnt = act + 8;
         return v;
     }
     return 0;
@@ -649,7 +724,6 @@ int ue4_setup(Ue4Ctx *c) {
     c->ready = 0;
     c->reflect_ok = 0;
     const Ue4Off *seeds[3] = { &DEF427, &DEF50, &DEF426 };
-
     for (int i = 0; i < 3; i++) {
         c->off = *seeds[i];
         c->ver = i;
@@ -663,7 +737,6 @@ int ue4_setup(Ue4Ctx *c) {
         c->ready = 1;
         return i;
     }
-
     c->off = DEF427;
     c->ver = 9;
     c->fov = 90.0f;
@@ -695,24 +768,24 @@ static void build_bones(EntOut *e) {
     RVec3 b = e->world;
     float yr = (float)e->yaw * D2R;
     float rx = cosf(yr) * 20.0f, ry = sinf(yr) * 20.0f;
-    e->bones[0]  = (RVec3){ b.x, b.y, b.z + h };
-    e->bones[1]  = (RVec3){ b.x, b.y, b.z + h * 0.90f };
-    e->bones[2]  = (RVec3){ b.x, b.y, b.z + h * 0.80f };
-    e->bones[3]  = (RVec3){ b.x - rx, b.y - ry, b.z + h * 0.80f };
-    e->bones[4]  = (RVec3){ b.x - rx * 1.7f, b.y - ry * 1.7f, b.z + h * 0.60f };
-    e->bones[5]  = (RVec3){ b.x - rx * 2.2f, b.y - ry * 2.2f, b.z + h * 0.45f };
-    e->bones[6]  = (RVec3){ b.x + rx, b.y + ry, b.z + h * 0.80f };
-    e->bones[7]  = (RVec3){ b.x + rx * 1.7f, b.y + ry * 1.7f, b.z + h * 0.60f };
-    e->bones[8]  = (RVec3){ b.x + rx * 2.2f, b.y + ry * 2.2f, b.z + h * 0.45f };
-    e->bones[9]  = (RVec3){ b.x, b.y, b.z + h * 0.50f };
-    e->bones[10] = (RVec3){ b.x - rx * 0.6f, b.y - ry * 0.6f, b.z + h * 0.50f };
-    e->bones[11] = (RVec3){ b.x + rx * 0.6f, b.y + ry * 0.6f, b.z + h * 0.50f };
-    e->bones[12] = (RVec3){ b.x - rx * 0.6f, b.y - ry * 0.6f, b.z + h * 0.26f };
-    e->bones[13] = (RVec3){ b.x + rx * 0.6f, b.y + ry * 0.6f, b.z + h * 0.26f };
-    e->bones[14] = (RVec3){ b.x, b.y, b.z };
+    e->bones[0]=(RVec3){b.x,b.y,b.z+h};
+    e->bones[1]=(RVec3){b.x,b.y,b.z+h*0.90f};
+    e->bones[2]=(RVec3){b.x,b.y,b.z+h*0.80f};
+    e->bones[3]=(RVec3){b.x-rx,b.y-ry,b.z+h*0.80f};
+    e->bones[4]=(RVec3){b.x-rx*1.7f,b.y-ry*1.7f,b.z+h*0.60f};
+    e->bones[5]=(RVec3){b.x-rx*2.2f,b.y-ry*2.2f,b.z+h*0.45f};
+    e->bones[6]=(RVec3){b.x+rx,b.y+ry,b.z+h*0.80f};
+    e->bones[7]=(RVec3){b.x+rx*1.7f,b.y+ry*1.7f,b.z+h*0.60f};
+    e->bones[8]=(RVec3){b.x+rx*2.2f,b.y+ry*2.2f,b.z+h*0.45f};
+    e->bones[9]=(RVec3){b.x,b.y,b.z+h*0.50f};
+    e->bones[10]=(RVec3){b.x-rx*0.6f,b.y-ry*0.6f,b.z+h*0.50f};
+    e->bones[11]=(RVec3){b.x+rx*0.6f,b.y+ry*0.6f,b.z+h*0.50f};
+    e->bones[12]=(RVec3){b.x-rx*0.6f,b.y-ry*0.6f,b.z+h*0.26f};
+    e->bones[13]=(RVec3){b.x+rx*0.6f,b.y+ry*0.6f,b.z+h*0.26f};
+    e->bones[14]=(RVec3){b.x,b.y,b.z};
 }
 
-static void op_from_class(uint64_t pawn, char *out) {
+static void op_from_class(uint64_t pawn, char *out, int max) {
     out[0] = 0;
     char buf[80] = {0};
     if (kcd_class_name(pawn, buf, 72) <= 0) return;
@@ -722,8 +795,8 @@ static void op_from_class(uint64_t pawn, char *out) {
     if (strncmp(p, "Op_", 3) == 0) p += 3;
     int n = (int)strlen(p);
     if (n > 2 && strcmp(p + n - 2, "_C") == 0) p[n - 2] = 0;
-    strncpy(out, p, 28);
-    out[28] = 0;
+    strncpy(out, p, max - 1);
+    out[max - 1] = 0;
 }
 
 int ue4_scan(Ue4Ctx *c, EntOut *out, int max) {
@@ -735,7 +808,6 @@ int ue4_scan(Ue4Ctx *c, EntOut *out, int max) {
     int cnt = (int)r32(l + c->off.lvl_cnt);
     if (cnt < 1) return 0;
     if (cnt > 4000) cnt = 4000;
-
     uint64_t self = c->self_pawn;
     int n = 0;
     for (int i = 0; i < cnt && n < max; i++) {
@@ -743,20 +815,15 @@ int ue4_scan(Ue4Ctx *c, EntOut *out, int max) {
         if (row_read_task(c->task, arr + (uint64_t)i * 8, &a, 8) != 0) continue;
         if (!okp(a)) continue;
         if (a == self) continue;
-
         uint64_t ps = kread_ptr(a + c->off.pawn_ps);
         if (!okp(ps)) continue;
-
         uint64_t root = kread_ptr(a + c->off.actor_root);
         if (!okp(root)) continue;
-
         RVec3 loc;
         if (row_read_task(c->task, root + c->off.root_loc, &loc, 12) != 0) continue;
         if (loc.x < -1000000.0f || loc.x > 1000000.0f) continue;
         if (loc.z < -100000.0f || loc.z > 100000.0f) continue;
-
         float dx = loc.x - c->pov_loc.x, dy = loc.y - c->pov_loc.y, dz = loc.z - c->pov_loc.z;
-
         EntOut *e = &out[n];
         memset(e, 0, sizeof(*e));
         e->pawn = a;
@@ -767,7 +834,10 @@ int ue4_scan(Ue4Ctx *c, EntOut *out, int max) {
         e->yaw = kcd_yaw_of(a);
         if (e->yaw < 0) e->yaw = 0;
         e->hp = kcd_health_of(a);
-        op_from_class(a, e->op);
+        op_from_class(a, e->op, 48);
+        char dn[48] = {0};
+        try_read_name(c, a, dn, 48);
+        if (dn[0]) { strncpy(e->op, dn, 47); e->op[47] = 0; }
         build_bones(e);
         n++;
     }
@@ -830,35 +900,27 @@ int ue4_scan_loot(Ue4Ctx *c, LootOut *out, int max) {
     int cnt = (int)r32(l + c->off.lvl_cnt);
     if (cnt < 1) return 0;
     if (cnt > 6000) cnt = 6000;
-
     int n = 0;
     for (int i = 0; i < cnt && n < max; i++) {
         uint64_t a = 0;
         if (row_read_task(c->task, arr + (uint64_t)i * 8, &a, 8) != 0) continue;
         if (!okp(a)) continue;
         if (a == c->self_pawn) continue;
-
         char cls[96] = {0};
         if (kcd_class_name(a, cls, 88) <= 0) continue;
         int tp = loot_type(cls);
         if (tp < 0) continue;
-
         uint64_t ps = kread_ptr(a + c->off.pawn_ps);
         if (okp(ps)) continue;
-
         int rar = loot_rarity(a);
         if (rar <= 0) rar = 3;
-
         uint64_t root = kread_ptr(a + c->off.actor_root);
         if (!okp(root)) continue;
-
         RVec3 loc;
         if (row_read_task(c->task, root + c->off.root_loc, &loc, 12) != 0) continue;
         if (loc.x < -1000000.0f || loc.x > 1000000.0f) continue;
         if (loc.z < -100000.0f || loc.z > 100000.0f) continue;
-
         float dx = loc.x - c->pov_loc.x, dy = loc.y - c->pov_loc.y, dz = loc.z - c->pov_loc.z;
-
         LootOut *o = &out[n];
         memset(o, 0, sizeof(*o));
         o->actor = a;
@@ -866,13 +928,12 @@ int ue4_scan_loot(Ue4Ctx *c, LootOut *out, int max) {
         o->dist = sqrtf(dx * dx + dy * dy + dz * dz) / 100.0f;
         o->rarity = rar;
         o->type = tp;
-
         char *p = cls;
         if (strncmp(p, "BP_", 3) == 0) p += 3;
         int L = (int)strlen(p);
         if (L > 2 && strcmp(p + L - 2, "_C") == 0) p[L - 2] = 0;
-        strncpy(o->name, p, 36);
-        o->name[36] = 0;
+        strncpy(o->name, p, 47);
+        o->name[47] = 0;
         n++;
     }
     return n;
@@ -902,10 +963,13 @@ static int     g_my_team = 1;
 static float   g_near = 1e9f;
 static int     g_near_team = -1;
 static int     g_near_yaw = -1;
-static char    g_near_op[32] = {0};
+static char    g_near_op[48] = {0};
 static int     g_back = 0;
 static int     g_humans = 0;
 static uint32_t g_tmask = 0;
+static int     g_locked = 0;
+static uint64_t g_locked_task = 0;
+static volatile int g_restart_kfd = 0;
 static UIWindow *g_esp = nil;
 static UIWindow *g_hud = nil;
 static UIWindow *g_panel = nil;
@@ -937,6 +1001,59 @@ static UIColor *team_color(int t, BOOL me) {
     return [UIColor colorWithRed:rgb[i][0]/255.0 green:rgb[i][1]/255.0 blue:rgb[i][2]/255.0 alpha:1.0];
 }
 
+static const char *op_cn(const char *en) {
+    if (!en || !en[0]) return "";
+    static const struct { const char *k; const char *v; } T[] = {
+        /* 突击 */
+        {"HongLang","红狼"},{"Honglang","红狼"},{"Wolfsbane","红狼"},{"Wolf","红狼"},
+        {"WeiLong","威龙"},{"Weilong","威龙"},{"Wyvern","威龙"},{"Dragon","威龙"},
+        {"WuMing","无名"},{"Wuming","无名"},{"Nameless","无名"},
+        {"JiFeng","疾风"},{"Jifeng","疾风"},{"Gale","疾风"},
+        {"YeHuo","野火"},{"Yehuo","野火"},{"Wildfire","野火"},
+        /* 支援 */
+        {"FengYi","蜂医"},{"Fengyi","蜂医"},{"Stinger","蜂医"},
+        {"Butterfly","蝶"},{"Die_","蝶"},
+        {"LvRen","旅人"},{"Lvren","旅人"},{"Wanderer","旅人"},
+        /* 工程 */
+        {"MuYangRen","牧羊人"},{"Muyangren","牧羊人"},{"Shepherd","牧羊人"},
+        {"WuLuLu","乌鲁鲁"},{"Wululu","乌鲁鲁"},{"Uluru","乌鲁鲁"},
+        {"ShenLan","深蓝"},{"Shenlan","深蓝"},{"DeepBlue","深蓝"},
+        {"BiTe","比特"},{"Bite","比特"},{"Bit_","比特"},
+        {"YeDan","液氮"},{"Yedan","液氮"},{"Nitrogen","液氮"},{"LiquidN","液氮"},
+        /* 侦察 */
+        {"HaiZhua","骇爪"},{"Haizhua","骇爪"},{"HaiZhao","骇爪"},{"Hackclaw","骇爪"},
+        {"YinYi","银翼"},{"Yinyi","银翼"},{"Silverwing","银翼"},{"SilverWing","银翼"},
+        {"HuiXiang","回响"},{"Huixiang","回响"},{"Echo","回响"},
+        {"Luna","露娜"},
+        {NULL,NULL}
+    };
+    for (int i = 0; T[i].k; i++) {
+        if (strstr(en, T[i].k)) return T[i].v;
+    }
+    if (strstr(en, "_Gu") || strstr(en, "Gu_") || strcmp(en, "Gu") == 0) return "蛊";
+    return en;
+}
+
+static const char *loot_cn(const char *en) {
+    if (!en || !en[0]) return "";
+    if (strstr(en, "SafeBox") || strstr(en, "Case_Safe")) return "保险箱";
+    if (strstr(en, "WeaponBox") || strstr(en, "GunCase")) return "武器箱";
+    if (strstr(en, "AmmoBox") || strstr(en, "Ammo_Case")) return "弹药箱";
+    if (strstr(en, "MedBox") || strstr(en, "MedicalBox")) return "医疗箱";
+    if (strstr(en, "SupplyBox") || strstr(en, "Supply")) return "补给箱";
+    if (strstr(en, "LootBox") || strstr(en, "Loot")) return "战利品";
+    if (strstr(en, "Crate")) return "木箱";
+    if (strstr(en, "Backpack")) return "背包";
+    if (strstr(en, "Rucksack")) return "行囊";
+    if (strstr(en, "Vest")) return "护甲";
+    if (strstr(en, "Helmet")) return "头盔";
+    if (strstr(en, "Grenade")) return "手雷";
+    if (strstr(en, "Medkit") || strstr(en, "FirstAid")) return "急救包";
+    if (strstr(en, "Bandage")) return "绷带";
+    if (strstr(en, "Injector") || strstr(en, "Stim")) return "注射器";
+    return en;
+}
+
 static void *scan_loop(void *arg) {
     (void)arg;
     if (row_up() != 0) return NULL;
@@ -955,18 +1072,61 @@ static void *scan_loop(void *arg) {
     kcd_gnames_scan();
 
     while (g_run) {
-        int pid = row_pid_by_name("DeltaForce");
-        if (pid <= 0) { usleep(300000); continue; }
-        if (pid != g_game_pid) {
-            g_game_pid = pid;
+        if (g_restart_kfd) {
+            g_restart_kfd = 0;
+            fprintf(stderr, "[kcd] restart kfd...\n");
+            g_kfd_ready = 0;
+            g_physmap_base = 0;
+            g_gnames = 0;
+            g_locked = 0;
+            g_locked_task = 0;
+            g_game_pid = 0;
             memset(&g_ctx, 0, sizeof(g_ctx));
-            g_ctx.task = row_task_of_pid(pid);
-            if (!g_ctx.task) { usleep(300000); continue; }
-            g_ctx.base = row_base_of_task(g_ctx.task);
-            if (!g_ctx.base) { usleep(300000); continue; }
+            if (row_up() == 0) {
+                uint64_t t2 = 0;
+                kread_buf(g_kernel_pmap + 0x08, &t2, 8);
+                t2 &= 0x0000FFFFFFFFC000ULL;
+                for (int i = 0; i < 512 && t2; i++) {
+                    uint64_t e = 0;
+                    kread_buf(t2 + (uint64_t)i * 8, &e, 8);
+                    if ((e & 3) == 3 && (e & 0x0000FFFFFFE00000ULL) == 0) {
+                        g_physmap_base = 0xfffffff000000000ULL + ((uint64_t)i << 30);
+                        break;
+                    }
+                }
+                kcd_gnames_scan();
+                fprintf(stderr, "[kcd] restart OK\n");
+            } else {
+                fprintf(stderr, "[kcd] restart FAIL\n");
+            }
+            continue;
+        }
+
+        int pid = row_pid_by_name("DeltaForce");
+        if (pid <= 0) {
+            if (g_locked) {
+                g_locked = 0;
+                g_locked_task = 0;
+                g_game_pid = 0;
+                memset(&g_ctx, 0, sizeof(g_ctx));
+            }
+            usleep(500000);
+            continue;
+        }
+        uint64_t task = row_task_of_pid(pid);
+        if (!task) { usleep(300000); continue; }
+        if (!g_locked || task != g_locked_task) {
+            uint64_t base = row_base_of_task(task);
+            if (!base) { usleep(300000); continue; }
+            memset(&g_ctx, 0, sizeof(g_ctx));
+            g_ctx.task = task;
+            g_ctx.base = base;
             g_ctx.sw = (int)[UIScreen mainScreen].bounds.size.width;
             g_ctx.sh = (int)[UIScreen mainScreen].bounds.size.height;
-            if (ue4_setup(&g_ctx) != 0 && !g_ctx.ready) { g_game_pid = 0; usleep(500000); continue; }
+            if (ue4_setup(&g_ctx) != 0 && !g_ctx.ready) { usleep(800000); continue; }
+            g_game_pid = pid;
+            g_locked_task = task;
+            g_locked = 1;
             if (g_ps_n >= 3) {
                 int sel = cfg_i(@"teamid_off", 0);
                 if (sel > 0) g_off_teamid = 0x2B8 + (sel - 1) * 8;
@@ -976,14 +1136,16 @@ static void *scan_loop(void *arg) {
                     else { int r2 = kcd_reflect_teamid(); if (r2 > 0) g_off_teamid = r2; }
                 }
             }
+            fprintf(stderr, "[kcd] LOCKED pid=%d task=%llx\n", pid, (unsigned long long)task);
         }
-        if (!g_ctx.ready) { usleep(200000); continue; }
+        if (!g_locked || !g_ctx.ready) { usleep(200000); continue; }
+
         g_my_team = cfg_i(@"my_team", 1);
         g_n = ue4_scan(&g_ctx, g_ents, MAX_ENT);
 
         float nr = 1e9f;
         int nt = -1, ny = -1, bk = 0, hm = 0;
-        char nop[32] = {0};
+        char nop[48] = {0};
         uint32_t tm = 0;
         int botf = cfg_b(@"bot_filter", YES) ? 1 : 0;
         int maxd = cfg_i(@"max_dist", 300);
@@ -1002,14 +1164,14 @@ static void *scan_loop(void *arg) {
                 nr = e->dist;
                 nt = e->team;
                 ny = e->yaw;
-                strncpy(nop, e->op, 31);
+                strncpy(nop, e->op, 47);
             }
         }
         g_near = nr;
         g_near_team = nt;
         g_near_yaw = ny;
-        strncpy(g_near_op, nop, 31);
-        g_near_op[31] = 0;
+        strncpy(g_near_op, nop, 47);
+        g_near_op[47] = 0;
         g_back = bk;
         g_humans = hm;
         g_tmask = tm;
@@ -1032,6 +1194,7 @@ static void *scan_loop(void *arg) {
     int showhp = cfg_b(@"health", YES) ? 1 : 0;
     int showdist = cfg_b(@"distance", YES) ? 1 : 0;
     int showname = cfg_b(@"op_name", YES) ? 1 : 0;
+    int nsrc = cfg_i(@"name_src", 0);
     CGFloat fs = (CGFloat)cfg_i(@"text_size", 13);
     CGFloat th = (CGFloat)cfg_i(@"thick", 1);
     UIFont *f = [UIFont boldSystemFontOfSize:fs];
@@ -1096,7 +1259,10 @@ static void *scan_loop(void *arg) {
             CGContextFillRect(ctx, hf);
         }
         NSString *txt = @"";
-        if (showname && e->op[0]) txt = [NSString stringWithFormat:@"%s", e->op];
+        if (showname && e->op[0]) {
+            const char *nm = (nsrc == 2) ? e->op : op_cn(e->op);
+            txt = [NSString stringWithFormat:@"%s", nm];
+        }
         if (showdist) {
             NSString *d = [NSString stringWithFormat:@"%.0fm", e->dist];
             txt = txt.length ? [NSString stringWithFormat:@"%@ %@", txt, d] : d;
@@ -1166,7 +1332,7 @@ static void make_esp(void) {
 @end
 
 static UILabel *mklab(CGFloat x, CGFloat y, int tag) {
-    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(x, y, 440, 26)];
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(x, y, 480, 26)];
     l.textColor = [UIColor whiteColor];
     l.font = [UIFont boldSystemFontOfSize:(CGFloat)cfg_i(@"text_size", 13)];
     l.userInteractionEnabled = YES;
@@ -1199,11 +1365,13 @@ static void make_hud(void) {
         (void)tt;
         if (!g_l1) return;
         int teams = __builtin_popcount(g_tmask);
+        int nsrc = cfg_i(@"name_src", 0);
+        const char *nm = (nsrc == 2) ? g_near_op : op_cn(g_near_op);
         if (g_near > 1e8f) {
             g_l1.text = @"最近: --";
-        } else if (g_near_op[0]) {
+        } else if (nm[0]) {
             g_l1.text = [NSString stringWithFormat:@"最近: %.0fm  队%d  朝向 %d  %s",
-                         g_near, g_near_team, g_near_yaw, g_near_op];
+                         g_near, g_near_team, g_near_yaw, nm];
         } else {
             g_l1.text = [NSString stringWithFormat:@"最近: %.0fm  队%d  朝向 %d",
                          g_near, g_near_team, g_near_yaw];
@@ -1262,6 +1430,7 @@ static NSArray *rows(void) {
         @[@"i", @"text_size", @"字号", @[@11, @13, @15, @18, @22]],
         @[@"i", @"thick", @"框线粗细", @[@1, @2, @3]],
         @[@"i", @"max_dist", @"最远距离", @[@50, @100, @150, @200, @300, @400, @500]],
+        @[@"i", @"name_src", @"名字来源", @[@"映射", @"游戏", @"英文"]],
         @[@"h", @"其他"],
         @[@"i", @"my_team", @"我的队伍", @[@0, @1, @2, @3, @4, @5, @6, @7, @8]],
         @[@"i", @"teamid_off", @"偏移校准", @[@0, @1, @2, @3, @4, @5, @6]],
@@ -1274,7 +1443,7 @@ static void panel_build(void) {
     if (g_panel) return;
     CGRect sc = [UIScreen mainScreen].bounds;
     CGFloat W = 340;
-    CGFloat H = MIN(sc.size.height - 110, 760);
+    CGFloat H = MIN(sc.size.height - 90, 800);
     g_panel = [[UIWindow alloc] initWithFrame:CGRectMake((sc.size.width - W) / 2,
                                                         (sc.size.height - H) / 2, W, H)];
     g_panel.windowLevel = UIWindowLevelAlert + 1000;
@@ -1329,7 +1498,7 @@ static void panel_refresh(void) {
             val = (cur && [cur boolValue]) ? @"开" : @"关";
         }
         UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-        b.frame = CGRectMake(8, y, 324, 38);
+        b.frame = CGRectMake(8, y, 324, 36);
         b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
         NSMutableString *tt = [NSMutableString stringWithFormat:@"  %@", nm];
         while ([tt length] < 22) [tt appendString:@" "];
@@ -1350,19 +1519,56 @@ static void panel_refresh(void) {
             panel_refresh();
         }] forControlEvents:UIControlEventTouchUpInside];
         [g_psv addSubview:b];
-        y += 42;
+        y += 40;
     }
+
+    NSString *kstr;
+    UIColor *kcol;
+    if (g_kfd_ready) { kstr = @"内核:正常"; kcol = [UIColor greenColor]; }
+    else if (g_open_tries > 0) {
+        kstr = [NSString stringWithFormat:@"内核:重试 %d/6", g_open_tries];
+        kcol = [UIColor yellowColor];
+    } else { kstr = @"内核:失败"; kcol = [UIColor redColor]; }
+
     NSString *vstr = g_ctx.ver == 9 ? @"慢扫" :
                      [NSString stringWithFormat:@"预%d", g_ctx.ver];
-    UILabel *st = [[UILabel alloc] initWithFrame:CGRectMake(16, y + 8, 320, 22)];
-    st.text = [NSString stringWithFormat:@"内核:%@ 池:%@ 队:0x%X 引擎:%@ 反射:%d",
-               g_kfd_ready ? @"正常" : @"异常",
-               g_gnames ? @"正常" : @"无",
+    UILabel *st = [[UILabel alloc] initWithFrame:CGRectMake(16, y + 8, 320, 20)];
+    st.text = [NSString stringWithFormat:@"%@ 池:%@ 队:0x%X 引擎:%@ 反射:%d",
+               kstr, g_gnames ? @"正常" : @"无",
                g_off_teamid, vstr, g_ctx.reflect_ok];
-    st.textColor = g_kfd_ready ? [UIColor greenColor] : [UIColor redColor];
+    st.textColor = kcol;
     st.font = [UIFont fontWithName:@"PingFangSC-Regular" size:11];
     [g_psv addSubview:st];
-    y += 34;
+    y += 24;
+
+    UILabel *lk = [[UILabel alloc] initWithFrame:CGRectMake(16, y, 320, 20)];
+    if (g_locked) {
+        lk.text = [NSString stringWithFormat:@"锁定:进程 %d 标记 %llx",
+                   g_game_pid, (unsigned long long)g_locked_task];
+        lk.textColor = [UIColor greenColor];
+    } else {
+        lk.text = @"锁定:未连接";
+        lk.textColor = [UIColor orangeColor];
+    }
+    lk.font = [UIFont fontWithName:@"PingFangSC-Regular" size:11];
+    [g_psv addSubview:lk];
+    y += 32;
+
+    UIButton *rb = [UIButton buttonWithType:UIButtonTypeSystem];
+    rb.frame = CGRectMake(8, y, 324, 40);
+    rb.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    [rb setTitle:@"  重新拉起内核" forState:UIControlStateNormal];
+    [rb setTitleColor:[UIColor colorWithRed:1.0 green:0.82 blue:0.3 alpha:1]
+             forState:UIControlStateNormal];
+    rb.titleLabel.font = [UIFont fontWithName:@"PingFangSC-Regular" size:15];
+    [rb addAction:[UIAction actionWithHandler:^(UIAction *a) {
+        (void)a;
+        g_restart_kfd = 1;
+        panel_hide();
+    }] forControlEvents:UIControlEventTouchUpInside];
+    [g_psv addSubview:rb];
+    y += 44;
+
     g_psv.contentSize = CGSizeMake(340, y);
 }
 
@@ -1476,7 +1682,7 @@ static void *loot_loop(void *arg) {
             CGContextStrokePath(ctx);
         }
         NSString *t = [NSString stringWithFormat:@"%s %s %.0fm",
-                       type_tag(o->type), o->name, o->dist];
+                       type_tag(o->type), loot_cn(o->name), o->dist];
         NSDictionary *wa = @{ NSFontAttributeName: f,
                               NSForegroundColorAttributeName: c };
         [t drawAtPoint:CGPointMake(box.origin.x, box.origin.y - fs - 1)
@@ -1613,14 +1819,19 @@ echo "===== COMPILE ====="
 SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
 TG=arm64e-apple-ios15.0
 LDP=$(cat "$TC/ld64_path.txt")
-CF="-target $TG -isysroot $SDK -fobjc-arc -w -O1 -Ikcore -Igame -Ikcore/kfd -Ikcore/kfd/libkfd -Ikcore/kfd/libkfd/libkfd"
+CF="-target $TG -isysroot $SDK -fobjc-arc -w -O1 -Ikcore -Igame -Ikcore/kfd -Ikcore/kfd/libkfd -Ikcore/kfd/libkfd/common -Ikcore/kfd/libkfd/info -Ikcore/kfd/libkfd/krkw -Ikcore/kfd/libkfd/puaf -Ikcore/kfd/libkfd/perf"
 
 rm -rf obj release
 mkdir -p obj release
 
-for f in kcore/krw.c game/ue4.c; do
+KFD_C=$(find kcore/kfd -name "*.c" -not -path "*/macos/*" 2>/dev/null | tr '\n' ' ')
+echo "  kfd sources: $KFD_C"
+
+for f in kcore/krw.c game/ue4.c $KFD_C; do
+  [ -f "$f" ] || continue
+  o="obj/$(echo "$f" | tr '/' '_' | sed 's/\.c$/.o/')"
   echo "  $f"
-  clang $CF -c "$f" -o "obj/$(basename "$f" .c).o"
+  clang $CF -c "$f" -o "$o"
 done
 
 echo "  tweak/Overlay.xm"
