@@ -1884,15 +1884,6 @@ for r, _, fs in os.walk('kcore/kfd'):
 print('patched headers:', n)
 PY
 
-echo "===== DUMP INFO STRUCT ====="
-sed -n '/^struct info/,/^};/p' kcore/kfd/kfd/libkfd/info.h 2>/dev/null | head -40 || true
-echo "--- slide/pmap grep ---"
-grep -rn "kernel_slide\|kernel_pmap" kcore/kfd/kfd/libkfd/ 2>/dev/null | head -10 || true
-echo "--- struct kfd ---"
-find kcore/kfd -name "common.h" -exec sed -n '/^struct kfd/,/^};/p' {} \; 2>/dev/null | head -20 || true
-echo "--- offsets def ---"
-grep -rn "off_gVirtBase\|off_gPhysBase\|off_ptov_table" kcore/kfd/kfd/fun/ 2>/dev/null | head -15 || true
-
 echo "===== COMPILE ====="
 SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
 TG=arm64e-apple-ios15.0
@@ -1912,14 +1903,41 @@ CFNO="-fno-objc-arc $CFBASE"
 rm -rf obj release
 mkdir -p obj release
 
-KFD_C=$(find kcore/kfd -name "*.c" -not -path "*/macos/*" 2>/dev/null | tr '\n' ' ')
+KFD_C=$(find kcore/kfd -name "*.c" -not -path "*/macos/*" -not -name "proc.c" 2>/dev/null | tr '\n' ' ')
 echo "  kfd sources: $KFD_C"
+
+echo "===== GEN KFD STUB ====="
+python3 - <<'PY'
+import re, os
+decls = set()
+for r, _, fs in os.walk('kcore/kfd'):
+    for f in fs:
+        if not f.endswith('.h'):
+            continue
+        p = os.path.join(r, f)
+        try:
+            s = open(p, errors='ignore').read()
+        except:
+            continue
+        for m in re.finditer(
+            r'extern\s+(?:uint32_t|uint64_t|int32_t|int64_t|uint16_t|uint8_t|size_t)\s+(off_\w+)\s*[;\[]',
+            s):
+            decls.add(m.group(1))
+lines = ['#include <stdint.h>', '#include <stddef.h>', '']
+for d in sorted(decls):
+    lines.append('uint32_t %s = 0;' % d)
+open('kcore/kfd_stub.c', 'w').write('\n'.join(lines) + '\n')
+print('stub defs:', len(decls))
+PY
 
 echo "  kcore/krw.c"
 clang $CF -x objective-c -c kcore/krw.c -o obj/krw.o
 
 echo "  game/ue4.c"
 clang $CF -x objective-c -c game/ue4.c -o obj/ue4.o
+
+echo "  kcore/kfd_stub.c"
+clang $CFNO -x objective-c -c kcore/kfd_stub.c -o obj/kfd_stub.o
 
 for f in $KFD_C; do
   [ -f "$f" ] || continue
