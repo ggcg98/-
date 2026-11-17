@@ -33,17 +33,57 @@ export PATH="/usr/local/bin:$PATH"
 export AR=ar
 
 echo "===== KFD ====="
-rm -rf /tmp/kfdrepo
-git clone --depth 1 https://github.com/felix-pb/kfd.git /tmp/kfdrepo
+rm -rf /tmp/kfdrepo /tmp/kfdtry
+KFD_OK=0
+KFD_TAG=""
+
+try_kfd() {
+  local url="$1"
+  local sub="$2"
+  local tag="$3"
+  rm -rf /tmp/kfdtry
+  if ! git clone --depth 1 "$url" /tmp/kfdtry 2>/dev/null; then
+    echo "[kfd] $tag  clone fail"
+    return 1
+  fi
+  local src="/tmp/kfdtry/$sub"
+  [ -d "$src" ] || src="/tmp/kfdtry"
+  local nc=$(find "$src" -name "*.c" 2>/dev/null | wc -l)
+  local nh=$(find "$src" -name "*.h" 2>/dev/null | wc -l)
+  echo "[kfd] $tag  c=$nc h=$nh"
+  if [ "$nc" -ge 2 ]; then
+    rm -rf /tmp/kfdrepo
+    mkdir -p /tmp/kfdrepo
+    cp -r "$src"/. /tmp/kfdrepo/
+    KFD_OK=1
+    KFD_TAG="$tag"
+    return 0
+  fi
+  return 1
+}
+
+try_kfd https://github.com/Wh1te4ever/kfd.git "" "felix-wh1te4ever" || \
+try_kfd https://github.com/khanhduytran0/kfd.git "" "felix-khanhduytran0" || \
+try_kfd https://github.com/34306/kfd.git "" "felix-34306" || \
+try_kfd https://github.com/GenericCoding/poisOnKFD.git "" "felix-poisOnKFD" || \
+try_kfd https://github.com/felix-pb/kfd.git "" "felix-orig" || \
+try_kfd https://github.com/Odyssey-Team/Taurine.git "Taurine/exploit/kfd" "taurine" || true
+
+if [ "$KFD_OK" != "1" ]; then
+  echo "NO KFD WITH SOURCES FOUND"
+  exit 1
+fi
+
+echo "===== KFD CHOSEN: $KFD_TAG ====="
+find /tmp/kfdrepo -maxdepth 2 -type f | head -30
 
 echo "===== TREES ====="
 rm -rf src dist
 mkdir -p src/kcore/kfd src/game src/tweak src/package/DEBIAN dist
 cp -r /tmp/kfdrepo/. src/kcore/kfd/
 rm -f src/kcore/kfd/macos_kfd.c
-rm -rf src/kcore/kfd/macos
-echo "--- kfd tree ---"
-find src/kcore/kfd -maxdepth 2 -type f | head -40
+rm -f src/kcore/kfd/kfd_krw.m src/kcore/kfd/kfd_krw.h
+rm -rf src/kcore/kfd/macos src/kcore/kfd/.git
 echo "c=$(find src/kcore/kfd -name '*.c' | wc -l) h=$(find src/kcore/kfd -name '*.h' | wc -l)"
 
 cat > src/kcore/krw.h <<'KRWH_EOF'
@@ -99,6 +139,12 @@ cat > src/kcore/krw.c <<'KRW_EOF'
 #define OFF_UPROP_OFF   0x4C
 #define OFF_UFIELD_NEXT 0x28
 
+#ifdef KFD_UNDERSCORE_API
+#define KR(k,a,b,n) kread_((k),(a),(b),(n))
+#else
+#define KR(k,a,b,n) kread((k),(a),(b),(n))
+#endif
+
 #if __has_include(<libkfd.h>)
 #include <libkfd.h>
 #define HAVE_KFD 1
@@ -128,18 +174,18 @@ int row_up(void){
       g_kernel_pmap=kd->info.kernel.kernel_pmap;
       g_kfd_ready=1;
       g_open_tries=-1;
-      fprintf(stderr,"[kcd] kopen OK after %d tries\n",a+1);
+      fprintf(stderr,"[kcd] kopen OK try=%d\n",a+1);
       return 0;
     }
-    fprintf(stderr,"[kcd] kopen failed try=%d\n",a+1);
+    fprintf(stderr,"[kcd] kopen fail try=%d\n",a+1);
     if(a<5) usleep((a+1)*1500000);
   }
   return -1;
 }
-uint64_t r64(uint64_t a){uint64_t v=0;kread(g_h,a,&v,8);return v;}
-uint32_t r32(uint64_t a){uint32_t v=0;kread(g_h,a,&v,4);return v;}
-float rf32(uint64_t a){float v=0;kread(g_h,a,&v,4);return v;}
-int kread_buf(uint64_t a,void*b,size_t n){kread(g_h,a,b,n);return 0;}
+uint64_t r64(uint64_t a){uint64_t v=0;KR(g_h,a,&v,8);return v;}
+uint32_t r32(uint64_t a){uint32_t v=0;KR(g_h,a,&v,4);return v;}
+float rf32(uint64_t a){float v=0;KR(g_h,a,&v,4);return v;}
+int kread_buf(uint64_t a,void*b,size_t n){KR(g_h,a,b,n);return 0;}
 #else
 int row_up(void){return -1;}
 uint64_t r64(uint64_t a){(void)a;return 0;}
@@ -190,7 +236,6 @@ int row_pid_by_name(const char *key) {
     int cand[64];
     int nc = 0;
     char path[1024];
-
     for (int i = 0; i < n; i++) {
         if (l[i] <= 0) continue;
         memset(path, 0, sizeof(path));
@@ -614,18 +659,14 @@ static int auto_offsets(Ue4Ctx *c) {
     if (o > 0) { c->off.uw_level = o; hit++; }
     o = rf_find(gw, "OwningGameInstance");
     if (o > 0) { c->off.uw_gi = o; hit++; }
-
     uint64_t lvl = kread_ptr(gw + c->off.uw_level);
     if (!okp(lvl)) return hit;
-
     o = rf_find(lvl, "Actors");
     if (o > 0) { c->off.lvl_actors = o; c->off.lvl_cnt = o + 8; hit++; }
-
     uint64_t arr = kread_ptr(lvl + c->off.lvl_actors);
     int cnt = (int)r32(lvl + c->off.lvl_cnt);
     if (!okp(arr) || cnt < 1) return hit;
     if (cnt > 5000) cnt = 5000;
-
     uint64_t any = 0, pawn = 0;
     for (int i = 0; i < cnt; i++) {
         uint64_t a = kread_ptr(arr + (uint64_t)i * 8);
@@ -636,7 +677,6 @@ static int auto_offsets(Ue4Ctx *c) {
             if (strstr(cn, "Character") || strstr(cn, "Pawn")) { pawn = a; break; }
         }
     }
-
     if (any) {
         o = rf_find(any, "RootComponent");
         if (o > 0) { c->off.actor_root = o; hit++; }
@@ -657,7 +697,6 @@ static int auto_offsets(Ue4Ctx *c) {
             if (o > 0) { c->off.ctrl_rot = o + 4; hit++; }
         }
     }
-
     uint64_t gi = kread_ptr(gw + c->off.uw_gi);
     if (okp(gi)) {
         o = rf_find(gi, "LocalPlayers");
@@ -1004,25 +1043,21 @@ static UIColor *team_color(int t, BOOL me) {
 static const char *op_cn(const char *en) {
     if (!en || !en[0]) return "";
     static const struct { const char *k; const char *v; } T[] = {
-        /* 突击 */
-        {"HongLang","红狼"},{"Honglang","红狼"},{"Wolfsbane","红狼"},{"Wolf","红狼"},
+        {"HongLang","红狼"},{"Honglang","红狼"},{"Wolf","红狼"},
         {"WeiLong","威龙"},{"Weilong","威龙"},{"Wyvern","威龙"},{"Dragon","威龙"},
         {"WuMing","无名"},{"Wuming","无名"},{"Nameless","无名"},
         {"JiFeng","疾风"},{"Jifeng","疾风"},{"Gale","疾风"},
         {"YeHuo","野火"},{"Yehuo","野火"},{"Wildfire","野火"},
-        /* 支援 */
         {"FengYi","蜂医"},{"Fengyi","蜂医"},{"Stinger","蜂医"},
-        {"Butterfly","蝶"},{"Die_","蝶"},
+        {"Butterfly","蝶"},
         {"LvRen","旅人"},{"Lvren","旅人"},{"Wanderer","旅人"},
-        /* 工程 */
         {"MuYangRen","牧羊人"},{"Muyangren","牧羊人"},{"Shepherd","牧羊人"},
         {"WuLuLu","乌鲁鲁"},{"Wululu","乌鲁鲁"},{"Uluru","乌鲁鲁"},
         {"ShenLan","深蓝"},{"Shenlan","深蓝"},{"DeepBlue","深蓝"},
-        {"BiTe","比特"},{"Bite","比特"},{"Bit_","比特"},
-        {"YeDan","液氮"},{"Yedan","液氮"},{"Nitrogen","液氮"},{"LiquidN","液氮"},
-        /* 侦察 */
+        {"BiTe","比特"},{"Bite","比特"},
+        {"YeDan","液氮"},{"Yedan","液氮"},{"Nitrogen","液氮"},
         {"HaiZhua","骇爪"},{"Haizhua","骇爪"},{"HaiZhao","骇爪"},{"Hackclaw","骇爪"},
-        {"YinYi","银翼"},{"Yinyi","银翼"},{"Silverwing","银翼"},{"SilverWing","银翼"},
+        {"YinYi","银翼"},{"Yinyi","银翼"},{"Silverwing","银翼"},
         {"HuiXiang","回响"},{"Huixiang","回响"},{"Echo","回响"},
         {"Luna","露娜"},
         {NULL,NULL}
@@ -1136,7 +1171,7 @@ static void *scan_loop(void *arg) {
                     else { int r2 = kcd_reflect_teamid(); if (r2 > 0) g_off_teamid = r2; }
                 }
             }
-            fprintf(stderr, "[kcd] LOCKED pid=%d task=%llx\n", pid, (unsigned long long)task);
+            fprintf(stderr, "[kcd] LOCKED pid=%d\n", pid);
         }
         if (!g_locked || !g_ctx.ready) { usleep(200000); continue; }
 
@@ -1543,8 +1578,7 @@ static void panel_refresh(void) {
 
     UILabel *lk = [[UILabel alloc] initWithFrame:CGRectMake(16, y, 320, 20)];
     if (g_locked) {
-        lk.text = [NSString stringWithFormat:@"锁定:进程 %d 标记 %llx",
-                   g_game_pid, (unsigned long long)g_locked_task];
+        lk.text = [NSString stringWithFormat:@"锁定:进程 %d", g_game_pid];
         lk.textColor = [UIColor greenColor];
     } else {
         lk.text = @"锁定:未连接";
@@ -1819,7 +1853,14 @@ echo "===== COMPILE ====="
 SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
 TG=arm64e-apple-ios15.0
 LDP=$(cat "$TC/ld64_path.txt")
-CF="-target $TG -isysroot $SDK -fobjc-arc -w -O1 -Ikcore -Igame -Ikcore/kfd -Ikcore/kfd/libkfd -Ikcore/kfd/libkfd/common -Ikcore/kfd/libkfd/info -Ikcore/kfd/libkfd/krkw -Ikcore/kfd/libkfd/puaf -Ikcore/kfd/libkfd/perf"
+
+KFD_DEF=""
+if [ "$KFD_TAG" = "taurine" ]; then
+  KFD_DEF="-DKFD_UNDERSCORE_API"
+fi
+echo "  kfd tag: $KFD_TAG  def: $KFD_DEF"
+
+CF="-target $TG -isysroot $SDK -fobjc-arc -w -O1 $KFD_DEF -Ikcore -Igame -Ikcore/kfd -Ikcore/kfd/libkfd -Ikcore/kfd/libkfd/libkfd -Ikcore/kfd/libkfd/common -Ikcore/kfd/libkfd/info -Ikcore/kfd/libkfd/krkw -Ikcore/kfd/libkfd/puaf -Ikcore/kfd/libkfd/perf"
 
 rm -rf obj release
 mkdir -p obj release
