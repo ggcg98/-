@@ -79,7 +79,6 @@ float kcd_health_of(uint64_t pawn);
 int   kcd_calib_teamid(void);
 int   kcd_reflect_teamid(void);
 KRWH
-
 echo "===== 3/5 KRW.C ====="
 cat > src/kcore/krw.c <<'KRW'
 #include "krw.h"
@@ -2164,7 +2163,7 @@ E1
 cat > src/package/DEBIAN/control <<'E2'
 Package: com.kcd.deltaforce
 Name: KCD
-Version: 3.1
+Version: 3.2
 Architecture: iphoneos-arm64
 Description: readonly esp (libjailbreak / dopamine / ios 15-16)
 Maintainer: kcd
@@ -2205,9 +2204,11 @@ clang $CF -x objective-c -c tweak/Overlay.xm -o obj/Overlay.o
 echo "===== LINK ====="
 clang -target $TG -isysroot $SDK -dynamiclib \
   -fuse-ld="$LDP" -Wl,-platform_version,ios,15.0,15.0 \
+  -Wl,-undefined,dynamic_lookup \
   -o release/libsystem_coreservices.dylib obj/*.o \
   -framework UIKit -framework Foundation -framework CoreFoundation \
-  -framework CoreGraphics -framework CoreText -framework QuartzCore
+  -framework CoreGraphics -framework CoreText -framework QuartzCore \
+  -framework IOKit
 
 echo "===== PACKAGE ====="
 rm -rf pkg
@@ -2217,7 +2218,7 @@ cp release/libsystem_coreservices.dylib \
 printf '{ Filter = { Executables = ( SpringBoard ); }; }\n' \
   > pkg/var/jb/Library/MobileSubstrate/DynamicLibraries/libsystem_coreservices.plist
 cp -r package/DEBIAN pkg/DEBIAN
-dpkg-deb -b pkg "$ROOT/dist/com.kcd.deltaforce_3.1_iphoneos-arm64.deb"
+dpkg-deb -b pkg "$ROOT/dist/com.kcd.deltaforce_3.2_iphoneos-arm64.deb"
 
 ls -lh "$ROOT/dist/"
 echo "===== DONE ====="
