@@ -1890,6 +1890,8 @@ echo "--- slide/pmap grep ---"
 grep -rn "kernel_slide\|kernel_pmap" kcore/kfd/kfd/libkfd/ 2>/dev/null | head -10 || true
 echo "--- struct kfd ---"
 find kcore/kfd -name "common.h" -exec sed -n '/^struct kfd/,/^};/p' {} \; 2>/dev/null | head -20 || true
+echo "--- offsets def ---"
+grep -rn "off_gVirtBase\|off_gPhysBase\|off_ptov_table" kcore/kfd/kfd/fun/ 2>/dev/null | head -15 || true
 
 echo "===== COMPILE ====="
 SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
@@ -1902,7 +1904,7 @@ if [ "$KFD_TAG" = "taurine" ]; then
 fi
 echo "  kfd tag: $KFD_TAG  def: $KFD_DEF"
 
-CFBASE="-target $TG -isysroot $SDK -w -O1 $KFD_DEF -include stdint.h -include stddef.h -include stdbool.h -Ikcore -Igame -Ikcore/kfd -Ikcore/kfd/libkfd -Ikcore/kfd/libkfd/libkfd -Ikcore/kfd/libkfd/common -Ikcore/kfd/libkfd/info -Ikcore/kfd/libkfd/krkw -Ikcore/kfd/libkfd/puaf -Ikcore/kfd/libkfd/perf -Ikcore/kfd/kfd -Ikcore/kfd/kfd/fun -Ikcore/kfd/kfd/libkfd"
+CFBASE="-target $TG -isysroot $SDK -w -O1 $KFD_DEF -include stdint.h -include stddef.h -include stdbool.h -include sys/types.h -Ikcore -Igame -Ikcore/kfd -Ikcore/kfd/libkfd -Ikcore/kfd/libkfd/libkfd -Ikcore/kfd/libkfd/common -Ikcore/kfd/libkfd/info -Ikcore/kfd/libkfd/krkw -Ikcore/kfd/libkfd/puaf -Ikcore/kfd/libkfd/perf -Ikcore/kfd/kfd -Ikcore/kfd/kfd/fun -Ikcore/kfd/kfd/libkfd"
 
 CF="-fobjc-arc $CFBASE"
 CFNO="-fno-objc-arc $CFBASE"
@@ -1923,7 +1925,7 @@ for f in $KFD_C; do
   [ -f "$f" ] || continue
   o="obj/$(echo "$f" | tr '/' '_' | sed 's/\.c$/.o/')"
   echo "  $f"
-  clang $CFNO -x objective-c -c "$f" -o "$o" || echo "  [skip] $f"
+  clang $CFNO -x objective-c -c "$f" -o "$o"
 done
 
 echo "  tweak/Overlay.xm"
