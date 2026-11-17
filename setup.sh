@@ -1849,6 +1849,24 @@ for r, _, fs in os.walk('kcore/kfd'):
 print('available killed')
 PY
 
+echo "===== FIX KFD HEADERS ====="
+python3 - <<'PY'
+import os, re
+n = 0
+for r, _, fs in os.walk('kcore/kfd'):
+    for f in fs:
+        if f.endswith(('.h', '.c', '.m')):
+            p = os.path.join(r, f)
+            s = open(p, errors='ignore').read()
+            if 'stdint.h' in s:
+                continue
+            if re.search(r'\b(uint8_t|uint16_t|uint32_t|uint64_t|int8_t|int16_t|int32_t|int64_t|uintptr_t)\b', s):
+                s = '#include <stdint.h>\n#include <stddef.h>\n' + s
+                open(p, 'w').write(s)
+                n += 1
+print('patched headers:', n)
+PY
+
 echo "===== COMPILE ====="
 SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
 TG=arm64e-apple-ios15.0
@@ -1860,7 +1878,7 @@ if [ "$KFD_TAG" = "taurine" ]; then
 fi
 echo "  kfd tag: $KFD_TAG  def: $KFD_DEF"
 
-CF="-target $TG -isysroot $SDK -fobjc-arc -w -O1 $KFD_DEF -Ikcore -Igame -Ikcore/kfd -Ikcore/kfd/libkfd -Ikcore/kfd/libkfd/libkfd -Ikcore/kfd/libkfd/common -Ikcore/kfd/libkfd/info -Ikcore/kfd/libkfd/krkw -Ikcore/kfd/libkfd/puaf -Ikcore/kfd/libkfd/perf"
+CF="-target $TG -isysroot $SDK -fobjc-arc -w -O1 $KFD_DEF -include stdint.h -include stddef.h -include stdbool.h -Ikcore -Igame -Ikcore/kfd -Ikcore/kfd/libkfd -Ikcore/kfd/libkfd/libkfd -Ikcore/kfd/libkfd/common -Ikcore/kfd/libkfd/info -Ikcore/kfd/libkfd/krkw -Ikcore/kfd/libkfd/puaf -Ikcore/kfd/libkfd/perf -Ikcore/kfd/kfd -Ikcore/kfd/kfd/fun -Ikcore/kfd/kfd/libkfd"
 
 rm -rf obj release
 mkdir -p obj release
